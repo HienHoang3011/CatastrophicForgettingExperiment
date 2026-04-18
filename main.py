@@ -11,9 +11,36 @@ def main():
     
     # Cấu hình Model & Data
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct", help="HuggingFace Model ID")
-    parser.add_argument("--dataset", type=str, default="Open-Reasoner-Zero/data/orz_math_57k_collected.json", help="Đường dẫn file JSON")
-    parser.add_argument("--samples", type=int, default=30000, help="Số lượng mẫu muốn load (vd: 30000)")
-    parser.add_argument("--batch-size", type=int, default=16, help="Batch size khi chạy eval")
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="AI-MO/NuminaMath-CoT",
+        help="Đường dẫn file JSON local hoặc Hugging Face dataset ID"
+    )
+    parser.add_argument(
+        "--dataset-split",
+        type=str,
+        default="train",
+        help="Split khi dùng Hugging Face dataset (vd: train)"
+    )
+    parser.add_argument("--samples", type=int, default=10000, help="Số lượng mẫu muốn load (vd: 10000)")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size khi chạy eval")
+    parser.add_argument("--train-epochs", type=float, default=2.0, help="Số epoch train cho SFT/Steered")
+    parser.add_argument("--learning-rate", type=float, default=5e-5, help="Learning rate cho SFT/Steered")
+    parser.add_argument("--eval-max-new-tokens", type=int, default=2048, help="Số token sinh tối đa khi evaluate_reasoning")
+    parser.add_argument("--eval-preview-samples", type=int, default=2, help="Số mẫu in preview trong evaluate_reasoning")
+    parser.add_argument(
+        "--system-prompt",
+        "--eval-system-prompt",
+        dest="system_prompt",
+        type=str,
+        default=(
+            "You are a rigorous math reasoning assistant. "
+            "Reason step by step internally, then return only one final answer in the form \\boxed{...}. "
+            "Do not include extra text after the boxed answer."
+        ),
+        help="System prompt dùng chung cho cả train formatting và evaluate_reasoning"
+    )
 
     parser.add_argument(
         "--mode",
@@ -49,7 +76,13 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     
-    train_ds, test_ds = prepare_data(tokenizer, args.dataset, args.samples)
+    train_ds, test_ds = prepare_data(
+        tokenizer,
+        args.dataset,
+        args.samples,
+        args.dataset_split,
+        args.system_prompt
+    )
     del tokenizer
     clean_memory()
 
@@ -58,15 +91,36 @@ def main():
     # 3. THỰC THI CÁC THÍ NGHIỆM ĐƯỢC CHỌN
     if args.run_baseline:
         print("\n" + "="*50 + "\n[1] EXPERIMENT: BASELINE (ZERO-SHOT)\n" + "="*50)
-        base_rsn = evaluate_reasoning(args.model, test_ds, args.batch_size)
+        base_rsn = evaluate_reasoning(
+            args.model,
+            test_ds,
+            args.batch_size,
+            args.system_prompt,
+            args.eval_max_new_tokens,
+            args.eval_preview_samples,
+        )
         base_hs, base_mmlu = evaluate_general(args.model)
         report["Baseline"] = {"Reasoning": base_rsn, "HellaSwag": base_hs, "MMLU": base_mmlu}
 
     if args.run_sft:
         print("\n" + "="*50 + "\n[2] EXPERIMENT: STANDARD SFT\n" + "="*50)
         sft_dir = "./model_sft"
-        train_model(args.model, train_ds, sft_dir, use_steer=False)
-        sft_rsn = evaluate_reasoning(sft_dir, test_ds, args.batch_size)
+        train_model(
+            args.model,
+            train_ds,
+            sft_dir,
+            use_steer=False,
+            learning_rate=args.learning_rate,
+            num_train_epochs=args.train_epochs,
+        )
+        sft_rsn = evaluate_reasoning(
+            sft_dir,
+            test_ds,
+            args.batch_size,
+            args.system_prompt,
+            args.eval_max_new_tokens,
+            args.eval_preview_samples,
+        )
         sft_hs, sft_mmlu = evaluate_general(sft_dir)
         report["Standard SFT"] = {"Reasoning": sft_rsn, "HellaSwag": sft_hs, "MMLU": sft_mmlu}
         delete_model(sft_dir)
@@ -74,8 +128,22 @@ def main():
     if args.run_steered:
         print("\n" + "="*50 + "\n[3] EXPERIMENT: STEERED SFT\n" + "="*50)
         steer_dir = "./model_steer"
-        train_model(args.model, train_ds, steer_dir, use_steer=True)
-        steer_rsn = evaluate_reasoning(steer_dir, test_ds, args.batch_size)
+        train_model(
+            args.model,
+            train_ds,
+            steer_dir,
+            use_steer=True,
+            learning_rate=args.learning_rate,
+            num_train_epochs=args.train_epochs,
+        )
+        steer_rsn = evaluate_reasoning(
+            steer_dir,
+            test_ds,
+            args.batch_size,
+            args.system_prompt,
+            args.eval_max_new_tokens,
+            args.eval_preview_samples,
+        )
         steer_hs, steer_mmlu = evaluate_general(steer_dir)
         report["Steered SFT"] = {"Reasoning": steer_rsn, "HellaSwag": steer_hs, "MMLU": steer_mmlu}
         delete_model(steer_dir)

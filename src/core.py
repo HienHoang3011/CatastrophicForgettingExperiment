@@ -2,12 +2,13 @@
 import os
 import json
 import math
+import re
 import torch
 import shutil
 import gc
 import torch.nn.functional as F
 from tqdm import tqdm
-from datasets import Dataset
+from datasets import Dataset, load_dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
 import lm_eval
 
@@ -64,28 +65,103 @@ def _build_steered_trainer_class(sft_trainer_cls):
 
     return SteeredTrainer
 
-def prepare_data(tokenizer, dataset_path, max_samples):
-    print(f"\n[DATA] Loading {max_samples} samples from {dataset_path}...")
-    
-    with open(dataset_path, "r", encoding="utf-8") as f:
-        raw_list = json.load(f)
+def _extract_final_answer(text):
+    if not text:
+        return ""
 
-    formatted_data = {"instruction": [], "output": []}
-    
-    # Lấy linh hoạt số lượng sample
-    for conv in raw_list[:max_samples]:
-        human_text = ""
-        assistant_text = ""
-        for turn in conv:
-            if turn.get("from") == "human":
-                human_text = turn.get("value", "")
-            elif turn.get("from") == "assistant":
-                assistant_text = turn.get("value", "")
-                if not assistant_text and "ground_truth" in turn:
-                    assistant_text = str(turn["ground_truth"].get("value", ""))
-                    
-        formatted_data["instruction"].append(human_text)
-        formatted_data["output"].append(assistant_text)
+    boxed_matches = re.findall(r"\\boxed\{([^}]*)\}", text)
+    if boxed_matches:
+        return boxed_matches[-1].strip()
+
+    non_empty_lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if non_empty_lines:
+        last_line = non_empty_lines[-1]
+        return last_line.rstrip(" .")
+
+    return text.strip()
+
+
+def _normalize_answer(text):
+    if not text:
+        return ""
+    normalized = text.lower().strip()
+    normalized = normalized.replace(" ", "")
+    normalized = normalized.replace("$", "")
+    normalized = normalized.replace("\\left", "")
+    normalized = normalized.replace("\\right", "")
+    normalized = normalized.replace("\\,", "")
+    normalized = normalized.replace("\n", "")
+    return normalized
+
+
+def _extract_from_numina_row(row):
+    user_text = row.get("problem", "") or ""
+    assistant_text = row.get("solution", "") or ""
+
+    messages = row.get("messages")
+    if isinstance(messages, list):
+        for msg in messages:
+            role = msg.get("role")
+            content = msg.get("content", "")
+            if role == "user" and not user_text:
+                user_text = content
+            elif role == "assistant" and content:
+                assistant_text = content
+
+    return user_text, assistant_text
+
+
+def _default_math_system_prompt():
+    return (
+        "You are a rigorous math reasoning assistant. "
+        "Reason step by step internally, then return only one final answer in the form \\boxed{...}. "
+        "Do not include extra text after the boxed answer."
+    )
+
+
+def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", system_prompt=None):
+    print(f"\n[DATA] Loading {max_samples} samples from {dataset_path}...")
+
+    if system_prompt is None:
+        system_prompt = _default_math_system_prompt()
+
+    formatted_data = {"instruction": [], "output": [], "final_answer": []}
+
+    if os.path.exists(dataset_path):
+        with open(dataset_path, "r", encoding="utf-8") as f:
+            raw_list = json.load(f)
+
+        for conv in raw_list[:max_samples]:
+            human_text = ""
+            assistant_text = ""
+            for turn in conv:
+                if turn.get("from") == "human":
+                    human_text = turn.get("value", "")
+                elif turn.get("from") == "assistant":
+                    assistant_text = turn.get("value", "")
+                    if not assistant_text and "ground_truth" in turn:
+                        assistant_text = str(turn["ground_truth"].get("value", ""))
+
+            if human_text and assistant_text:
+                formatted_data["instruction"].append(human_text)
+                formatted_data["output"].append(assistant_text)
+                formatted_data["final_answer"].append(_extract_final_answer(assistant_text))
+    else:
+        hf_dataset = load_dataset(dataset_path, split=dataset_split)
+        sample_count = min(max_samples, len(hf_dataset))
+        hf_dataset = hf_dataset.select(range(sample_count))
+
+        for row in hf_dataset:
+            question, solution = _extract_from_numina_row(row)
+            if question and solution:
+                formatted_data["instruction"].append(question)
+                formatted_data["output"].append(solution)
+                formatted_data["final_answer"].append(_extract_final_answer(solution))
+
+    if not formatted_data["instruction"]:
+        raise ValueError(
+            "No valid samples were loaded. Check dataset path/repo and expected columns."
+        )
 
     raw_dataset = Dataset.from_dict(formatted_data)
     split_ds = raw_dataset.train_test_split(test_size=0.2, seed=42)
@@ -97,7 +173,7 @@ def prepare_data(tokenizer, dataset_path, max_samples):
         texts = []
         for q, a in zip(examples['instruction'], examples['output']):
             messages = [
-                {"role": "system", "content": "You are a logical reasoning assistant."},
+                {"role": "system", "content": system_prompt},
                 {"role": "user", "content": q},
                 {"role": "assistant", "content": a}
             ]
@@ -107,7 +183,14 @@ def prepare_data(tokenizer, dataset_path, max_samples):
     train_dataset = train_dataset.map(format_train, batched=True)
     return train_dataset, test_dataset
 
-def evaluate_reasoning(model_path, test_dataset, batch_size=16):
+def evaluate_reasoning(
+    model_path,
+    test_dataset,
+    batch_size=16,
+    eval_system_prompt=None,
+    eval_max_new_tokens=2048,
+    preview_samples=5,
+):
     print(f"\n[EVAL] Running Batched Reasoning Inference on {len(test_dataset)} samples...")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
@@ -120,29 +203,50 @@ def evaluate_reasoning(model_path, test_dataset, batch_size=16):
 
     correct = 0
     total = len(test_dataset)
+    shown_preview = 0
+
+    if eval_system_prompt is None:
+        eval_system_prompt = _default_math_system_prompt()
 
     for i in tqdm(range(0, total, batch_size), desc="Inferencing"):
         batch = test_dataset[i : i + batch_size]
         prompts = []
         for q in batch['instruction']:
-            # ZERO SYSTEM PROMPT AS REQUESTED
-            constrained_q = q + "\n\nAnswer with only the final result in one short line."
-            messages = [{"role": "user", "content": constrained_q}]
+            constrained_q = q + "\n\nReturn final answer as \\boxed{...}."
+            messages = [
+                {"role": "system", "content": eval_system_prompt},
+                {"role": "user", "content": constrained_q}
+            ]
             prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to("cuda")
         
         with torch.no_grad():
             outputs = model.generate(
-                **inputs, max_new_tokens=20, do_sample=False,
+                **inputs, max_new_tokens=eval_max_new_tokens, do_sample=False,
                 pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id
             )
             
         input_len = inputs.input_ids.shape[-1]
         for j in range(len(prompts)):
-            gen_text = tokenizer.decode(outputs[j][input_len:], skip_special_tokens=True).lower()
-            if batch['output'][j].strip().lower() in gen_text:
+            gen_text = tokenizer.decode(outputs[j][input_len:], skip_special_tokens=True)
+            gen_final = _extract_final_answer(gen_text)
+            gen_norm = _normalize_answer(gen_final)
+
+            target_raw = batch['final_answer'][j] if 'final_answer' in batch else batch['output'][j]
+            target_norm = _normalize_answer(_extract_final_answer(target_raw))
+
+            if target_norm and (target_norm == gen_norm or target_norm in _normalize_answer(gen_text)):
                 correct += 1
+
+            if shown_preview < preview_samples:
+                shown_preview += 1
+                print("\n[PREVIEW SAMPLE]", shown_preview)
+                print("Q:", batch['instruction'][j])
+                print("Pred:", gen_text)
+                print("Pred Final:", gen_final)
+                print("Target Final:", _extract_final_answer(target_raw))
+                print("Match:", target_norm == gen_norm or target_norm in _normalize_answer(gen_text))
 
     del model
     del tokenizer
@@ -165,7 +269,7 @@ def evaluate_general(model_path):
     clean_memory()
     return hs_acc * 100, mmlu_acc * 100
 
-def train_model(base_model, train_dataset, output_dir, use_steer=False):
+def train_model(base_model, train_dataset, output_dir, use_steer=False, learning_rate=5e-5, num_train_epochs=2):
     print(f"\n[TRAIN] Starting Training (Steered={use_steer}). Output: {output_dir}")
     SFTTrainer, SFTConfig = _import_trl_or_raise()
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -181,10 +285,10 @@ def train_model(base_model, train_dataset, output_dir, use_steer=False):
         output_dir=output_dir,
         dataset_text_field="text",  
         max_length=4096,               
-        per_device_train_batch_size=4, 
+        per_device_train_batch_size=2, 
         gradient_accumulation_steps=8,
-        learning_rate=2e-5,            
-        num_train_epochs=1,
+        learning_rate=learning_rate,
+        num_train_epochs=num_train_epochs,
         bf16=True,
         gradient_checkpointing=False,  
         logging_steps=10,

@@ -42,7 +42,7 @@ git clone https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero.git
 uv init --python 3.10
 source .venv/bin/activate
 
-# 2. Cài dependency chính theo bộ version ổn định
+# 2.1 Cài dependency chính theo bộ version ổn định (Nếu chưa có, hoặc muốn cài lại từ đầu)
 uv add --index https://pypi.org/simple --index https://download.pytorch.org/whl/cu128 \
    'torch==2.8.0' \
    'torchvision==0.23.0' \
@@ -53,11 +53,13 @@ uv add --index https://pypi.org/simple --index https://download.pytorch.org/whl/
    'deepspeed>=0.14' \
    'vllm==0.11.0'
 
+uv add datasets accelerate bitsandbytes scikit-learn "lm_eval[hf]" "torchao<0.8.0"
+
+# 2.2 Nếu đã có project.toml với uv.lock rồi thì không chạy 2.1
+uv sync --no-install-package flash-attn
+
 # 3. Cài FlashAttention
 uv add flash-attn==2.8.3 --no-build-isolation
-
-# 4. Cài thêm bộ đánh giá
-uv add datasets accelerate bitsandbytes scikit-learn "lm_eval[hf]" "torchao<0.8.0"
 ```
 
 ---
@@ -65,6 +67,8 @@ uv add datasets accelerate bitsandbytes scikit-learn "lm_eval[hf]" "torchao<0.8.
 ## 🚀 Hướng Dẫn Sử Dụng (CLI)
 
 Bộ điều khiển trung tâm nằm tại file `main.py`. Bạn có thể tùy biến mọi tham số đầu vào.
+
+Mặc định pipeline hiện dùng dataset Hugging Face: `AI-MO/NuminaMath-CoT` (split `train`).
 
 ### Các Lệnh Phổ Biến
 
@@ -98,6 +102,16 @@ uv run main.py --mode sft-steered
 Dùng model nhỏ gọn 1.5B, chỉ lấy 1.000 sample và đẩy Batch Size lên 32 để test xem code có chạy mượt không trước khi chạy thật.
 ```bash
 uv run main.py --model Qwen/Qwen2.5-1.5B-Instruct --samples 1000 --batch-size 32 --mode all
+```
+
+**7. Chạy với NuminaMath-CoT (chỉ rõ dataset HF nếu muốn override)**
+```bash
+uv run main.py --dataset AI-MO/NuminaMath-CoT --dataset-split train --mode sft
+```
+
+**8. Quay lại dataset JSON local cũ**
+```bash
+uv run main.py --dataset Open-Reasoner-Zero/data/orz_math_57k_collected.json --mode sft
 ```
 
 Bạn vẫn có thể dùng cờ cũ (`--run-sft`, `--run-steered`, `--run-all`) để tương thích với script cũ.
