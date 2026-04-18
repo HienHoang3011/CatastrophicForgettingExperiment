@@ -14,6 +14,13 @@ def main():
     parser.add_argument("--dataset", type=str, default="Open-Reasoner-Zero/data/orz_math_57k_collected.json", help="Đường dẫn file JSON")
     parser.add_argument("--samples", type=int, default=30000, help="Số lượng mẫu muốn load (vd: 30000)")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size khi chạy eval")
+
+    parser.add_argument(
+        "--mode",
+        type=str,
+        choices=["baseline", "sft", "steered", "sft-steered", "all"],
+        help="Chọn chế độ chạy nhanh: baseline | sft | steered | sft-steered | all"
+    )
     
     # Cấu hình Bật/Tắt Experiment (Mặc định là False, truyền cờ vào sẽ thành True)
     parser.add_argument("--run-baseline", action="store_true", help="Chỉ chạy Zero-shot Evaluation cho Base model")
@@ -23,14 +30,18 @@ def main():
 
     args = parser.parse_args()
 
-    # Nếu người dùng chọn --run-all, tự động bật 3 cờ kia lên
-    if args.run_all:
+    # Ưu tiên --mode nếu có, giữ tương thích ngược cho các cờ cũ
+    if args.mode:
+        args.run_baseline = args.mode in ["baseline", "all"]
+        args.run_sft = args.mode in ["sft", "sft-steered", "all"]
+        args.run_steered = args.mode in ["steered", "sft-steered", "all"]
+    elif args.run_all:
         args.run_baseline = args.run_sft = args.run_steered = True
 
     # Check nếu user chạy script mà quên chọn experiment
     if not (args.run_baseline or args.run_sft or args.run_steered):
         print("❌ LỖI: Bạn chưa chọn Thí nghiệm nào để chạy!")
-        print("💡 Gợi ý: Thêm cờ --run-baseline, --run-steered, hoặc --run-all")
+        print("💡 Gợi ý: Dùng --mode sft / --mode steered / --mode all")
         return
 
     # 2. CHUẨN BỊ DỮ LIỆU CHUNG

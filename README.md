@@ -76,19 +76,31 @@ uv run main.py --run-all
 
 **2. Chỉ Chạy Đánh Giá Base Model (Không Train)**
 ```bash
-uv run main.py --run-baseline
+uv run main.py --mode baseline
 ```
 
-**3. Chỉ Chạy Huấn Luyện & Đánh Giá Thuật Toán Steered (Custom Loss)**
+**3. Chỉ Chạy Standard SFT + Eval (Không chạy Baseline)**
 ```bash
-uv run main.py --run-steered
+uv run main.py --mode sft
 ```
 
-**4. Chạy Thử Nghiệm Nhanh (Debug Mode)**
+**4. Chỉ Chạy Huấn Luyện & Đánh Giá Thuật Toán Steered (Custom Loss)**
+```bash
+uv run main.py --mode steered
+```
+
+**5. Chạy SFT + Steered SFT + Eval (Bỏ qua Baseline)**
+```bash
+uv run main.py --mode sft-steered
+```
+
+**6. Chạy Thử Nghiệm Nhanh (Debug Mode)**
 Dùng model nhỏ gọn 1.5B, chỉ lấy 1.000 sample và đẩy Batch Size lên 32 để test xem code có chạy mượt không trước khi chạy thật.
 ```bash
-uv run main.py --model Qwen/Qwen2.5-1.5B-Instruct --samples 1000 --batch-size 32 --run-all
+uv run main.py --model Qwen/Qwen2.5-1.5B-Instruct --samples 1000 --batch-size 32 --mode all
 ```
+
+Bạn vẫn có thể dùng cờ cũ (`--run-sft`, `--run-steered`, `--run-all`) để tương thích với script cũ.
 
 ---
 
