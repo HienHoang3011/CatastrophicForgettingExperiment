@@ -1,0 +1,29 @@
+[project]
+name = "catastrophicforgettingexperiment"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "accelerate>=1.13.0",
+    "bitsandbytes>=0.49.2",
+    "datasets>=4.8.4",
+    "deepspeed>=0.14",
+    "flash-attn==2.8.3",
+    "lm-eval[hf]>=0.4.11",
+    "peft>=0.11,<0.19",
+    "scikit-learn>=1.7.2",
+    "torch==2.8.0",
+    "torchao<0.8.0",
+    "torchaudio==2.8.0",
+    "torchvision==0.23.0",
+    "transformers>=4.36.0",
+    "trl>=0.15,<0.25",
+    "vllm==0.11.0",
+]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+
+[[tool.uv.index]]
+url = "https://download.pytorch.org/whl/cu128"

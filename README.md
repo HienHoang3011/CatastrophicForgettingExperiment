@@ -34,17 +34,30 @@ curl -LsSf [https://astral.sh/uv/install.sh](https://astral.sh/uv/install.sh) | 
 
 **2. Khởi tạo và tải dự án:**
 ```bash
-git clone <your-repo-url> qwen-steered-eval
-cd qwen-steered-eval
+git clone https://github.com/QuangNguyen711/CatastrophicForgettingExperiment.git
+cd CatastrophicForgettingExperiment
+git clone https://github.com/Open-Reasoner-Zero/Open-Reasoner-Zero.git
 
-# Cài đặt toàn bộ dependencies siêu tốc
-uv sync
-```
+# 1. Tạo môi trường ảo
+uv init --python 3.10
+source .venv/bin/activate
 
-**3. Tải Dataset cục bộ:**
-Framework sử dụng bộ dữ liệu toán học `Open-Reasoner-Zero`. Hãy clone nó thẳng vào thư mục dự án:
-```bash
-git clone [https://github.com/Open-Thoughts/Open-Reasoner-Zero.git](https://github.com/Open-Thoughts/Open-Reasoner-Zero.git) data_repo
+# 2. Cài dependency chính theo bộ version ổn định
+uv add --index https://pypi.org/simple --index https://download.pytorch.org/whl/cu128 \
+   'torch==2.8.0' \
+   'torchvision==0.23.0' \
+   'torchaudio==2.8.0' \
+   'transformers==4.57.6' \
+   'peft>=0.11,<0.19' \
+   'trl>=0.15,<0.25' \
+   'deepspeed>=0.14' \
+   'vllm==0.11.0'
+
+# 3. Cài FlashAttention
+uv add flash-attn==2.8.3 --no-build-isolation
+
+# 4. Cài thêm bộ đánh giá
+uv add datasets accelerate bitsandbytes scikit-learn "lm_eval[hf]" "torchao<0.8.0"
 ```
 
 ---
@@ -110,4 +123,4 @@ Pipeline tự động thực hiện 2 bài kiểm tra để lấy số liệu:
 ## ⚠️ Khắc Phục Sự Cố (Troubleshooting)
 
 - **Lỗi OOM (Out of Memory):** Nếu bạn chạy trên GPU yếu hơn H100, hãy giảm `batch_size` (trong `main.py`) và giảm `per_device_train_batch_size` (trong `src/core.py`). Bật lại `gradient_checkpointing=True`.
-- **Lỗi `FlashAttention only supports Ampere GPUs or newer`:** GPU của bạn quá cũ. Hãy vào `src/core.py`, tìm dòng `attn_implementation="flash_attention_2"` và đổi thành `"sdpa"`.
+- **Lỗi FlashAttention/flash-attn binary (undefined symbol, import error):** Nếu môi trường CUDA/PyTorch không khớp, hãy vào `src/core.py` và dùng `attn_implementation="eager"` (an toàn nhất) hoặc `"sdpa"` thay vì `"flash_attention_2"`.

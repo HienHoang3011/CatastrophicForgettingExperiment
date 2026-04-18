@@ -11,7 +11,7 @@ def main():
     
     # Cấu hình Model & Data
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct", help="HuggingFace Model ID")
-    parser.add_argument("--dataset", type=str, default="data_repo/data/orz_math_57k_collected.json", help="Đường dẫn file JSON")
+    parser.add_argument("--dataset", type=str, default="Open-Reasoner-Zero/data/orz_math_57k_collected.json", help="Đường dẫn file JSON")
     parser.add_argument("--samples", type=int, default=30000, help="Số lượng mẫu muốn load (vd: 30000)")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size khi chạy eval")
     

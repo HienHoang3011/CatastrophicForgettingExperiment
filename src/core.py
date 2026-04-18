@@ -9,47 +9,60 @@ import torch.nn.functional as F
 from tqdm import tqdm
 from datasets import Dataset
 from transformers import AutoTokenizer, AutoModelForCausalLM
-from trl import SFTTrainer, SFTConfig
 import lm_eval
 
-class SteeredTrainer(SFTTrainer):
-    def __init__(self, *args, x_factor=0.2, **kwargs):
-        super().__init__(*args, **kwargs)
-        self.margin = math.log(1 + x_factor)
+def _import_trl_or_raise():
+    try:
+        from trl import SFTTrainer, SFTConfig
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to import TRL training components. Baseline/evaluation can run without TRL, "
+            "but SFT training needs compatible versions of trl and transformers."
+        ) from e
+    return SFTTrainer, SFTConfig
 
-    def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-        outputs = model(**inputs)
-        logits = outputs.get("logits")
-        labels = inputs.get("labels")
 
-        shift_logits = logits[..., :-1, :].contiguous()
-        shift_labels = labels[..., 1:].contiguous()
-        
-        shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-        shift_labels = shift_labels.view(-1)
-        
-        mask = shift_labels != -100
-        active_logits = shift_logits[mask]
-        active_labels = shift_labels[mask]
+def _build_steered_trainer_class(sft_trainer_cls):
+    class SteeredTrainer(sft_trainer_cls):
+        def __init__(self, *args, x_factor=0.2, **kwargs):
+            super().__init__(*args, **kwargs)
+            self.margin = math.log(1 + x_factor)
 
-        with torch.no_grad():
-            target_logits = active_logits.clone()
-            temp_logits = target_logits.clone()
-            batch_idx = torch.arange(target_logits.size(0), device=target_logits.device)
-            temp_logits[batch_idx, active_labels] = float('-inf')
-            
-            max_other_logits, _ = torch.max(temp_logits, dim=-1)
-            current_gt_logits = target_logits[batch_idx, active_labels]
-            
-            target_gt_logits = torch.max(current_gt_logits, max_other_logits + self.margin)
-            target_logits[batch_idx, active_labels] = target_gt_logits
-            
-            target_probs = F.softmax(target_logits, dim=-1)
+        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
+            outputs = model(**inputs)
+            logits = outputs.get("logits")
+            labels = inputs.get("labels")
 
-        log_probs = F.log_softmax(active_logits, dim=-1)
-        loss = F.kl_div(log_probs, target_probs, reduction='batchmean')
+            shift_logits = logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
 
-        return (loss, outputs) if return_outputs else loss 
+            shift_logits = shift_logits.view(-1, shift_logits.size(-1))
+            shift_labels = shift_labels.view(-1)
+
+            mask = shift_labels != -100
+            active_logits = shift_logits[mask]
+            active_labels = shift_labels[mask]
+
+            with torch.no_grad():
+                target_logits = active_logits.clone()
+                temp_logits = target_logits.clone()
+                batch_idx = torch.arange(target_logits.size(0), device=target_logits.device)
+                temp_logits[batch_idx, active_labels] = float('-inf')
+
+                max_other_logits, _ = torch.max(temp_logits, dim=-1)
+                current_gt_logits = target_logits[batch_idx, active_labels]
+
+                target_gt_logits = torch.max(current_gt_logits, max_other_logits + self.margin)
+                target_logits[batch_idx, active_labels] = target_gt_logits
+
+                target_probs = F.softmax(target_logits, dim=-1)
+
+            log_probs = F.log_softmax(active_logits, dim=-1)
+            loss = F.kl_div(log_probs, target_probs, reduction='batchmean')
+
+            return (loss, outputs) if return_outputs else loss
+
+    return SteeredTrainer
 
 def prepare_data(tokenizer, dataset_path, max_samples):
     print(f"\n[DATA] Loading {max_samples} samples from {dataset_path}...")
@@ -101,7 +114,7 @@ def evaluate_reasoning(model_path, test_dataset, batch_size=16):
     tokenizer.padding_side = "left"
 
     model = AutoModelForCausalLM.from_pretrained(
-        model_path, torch_dtype=torch.bfloat16, device_map="cuda", 
+        model_path, dtype=torch.bfloat16, device_map="cuda", 
         attn_implementation="flash_attention_2", trust_remote_code=True
     ).eval()
 
@@ -113,14 +126,15 @@ def evaluate_reasoning(model_path, test_dataset, batch_size=16):
         prompts = []
         for q in batch['instruction']:
             # ZERO SYSTEM PROMPT AS REQUESTED
-            messages = [{"role": "user", "content": q}]
+            constrained_q = q + "\n\nAnswer with only the final result in one short line."
+            messages = [{"role": "user", "content": constrained_q}]
             prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
         inputs = tokenizer(prompts, return_tensors="pt", padding=True).to("cuda")
         
         with torch.no_grad():
             outputs = model.generate(
-                **inputs, max_new_tokens=1024, do_sample=False,
+                **inputs, max_new_tokens=20, do_sample=False,
                 pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id
             )
             
@@ -153,12 +167,13 @@ def evaluate_general(model_path):
 
 def train_model(base_model, train_dataset, output_dir, use_steer=False):
     print(f"\n[TRAIN] Starting Training (Steered={use_steer}). Output: {output_dir}")
+    SFTTrainer, SFTConfig = _import_trl_or_raise()
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "right"
     
     model = AutoModelForCausalLM.from_pretrained(
-        base_model, torch_dtype=torch.bfloat16, device_map="cuda", 
+        base_model, dtype=torch.bfloat16, device_map="cuda", 
         attn_implementation="flash_attention_2", trust_remote_code=True
     )
 
@@ -179,7 +194,7 @@ def train_model(base_model, train_dataset, output_dir, use_steer=False):
         report_to="none"
     )
 
-    trainer_class = SteeredTrainer if use_steer else SFTTrainer
+    trainer_class = _build_steered_trainer_class(SFTTrainer) if use_steer else SFTTrainer
     trainer_kwargs = {"x_factor": 1.0} if use_steer else {}
 
     trainer = trainer_class(
