@@ -69,29 +69,42 @@ def _extract_final_answer(text):
     if not text:
         return ""
 
-    boxed_matches = re.findall(r"\\boxed\{([^}]*)\}", text)
-    if boxed_matches:
-        return boxed_matches[-1].strip()
+    boxed_contents = []
+    needle = "\\boxed{"
+    start = 0
+    while True:
+        idx = text.find(needle, start)
+        if idx == -1:
+            break
 
-    non_empty_lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if non_empty_lines:
-        last_line = non_empty_lines[-1]
-        return last_line.rstrip(" .")
+        i = idx + len(needle)
+        depth = 1
+        chunk = []
+        while i < len(text) and depth > 0:
+            ch = text[i]
+            if ch == "{":
+                depth += 1
+            elif ch == "}":
+                depth -= 1
+                if depth == 0:
+                    i += 1
+                    break
+            if depth > 0:
+                chunk.append(ch)
+            i += 1
 
-    return text.strip()
+        if depth == 0:
+            boxed_contents.append("".join(chunk).strip())
+            start = i
+        else:
+            # Unbalanced braces: stop parsing boxed blocks and fallback below.
+            break
 
+    if boxed_contents:
+        return boxed_contents[-1]
 
-def _normalize_answer(text):
-    if not text:
-        return ""
-    normalized = text.lower().strip()
-    normalized = normalized.replace(" ", "")
-    normalized = normalized.replace("$", "")
-    normalized = normalized.replace("\\left", "")
-    normalized = normalized.replace("\\right", "")
-    normalized = normalized.replace("\\,", "")
-    normalized = normalized.replace("\n", "")
-    return normalized
+    # Box-only policy: if no \boxed{...} is found, treat as empty answer.
+    return ""
 
 
 def _extract_from_numina_row(row):
@@ -231,12 +244,11 @@ def evaluate_reasoning(
         for j in range(len(prompts)):
             gen_text = tokenizer.decode(outputs[j][input_len:], skip_special_tokens=True)
             gen_final = _extract_final_answer(gen_text)
-            gen_norm = _normalize_answer(gen_final)
 
             target_raw = batch['final_answer'][j] if 'final_answer' in batch else batch['output'][j]
-            target_norm = _normalize_answer(_extract_final_answer(target_raw))
+            target_final = _extract_final_answer(target_raw)
 
-            if target_norm and (target_norm == gen_norm or target_norm in _normalize_answer(gen_text)):
+            if target_final and target_final == gen_final:
                 correct += 1
 
             if shown_preview < preview_samples:
@@ -245,8 +257,8 @@ def evaluate_reasoning(
                 print("Q:", batch['instruction'][j])
                 print("Pred:", gen_text)
                 print("Pred Final:", gen_final)
-                print("Target Final:", _extract_final_answer(target_raw))
-                print("Match:", target_norm == gen_norm or target_norm in _normalize_answer(gen_text))
+                print("Target Final:", target_final)
+                print("Match:", target_final == gen_final)
 
     del model
     del tokenizer
