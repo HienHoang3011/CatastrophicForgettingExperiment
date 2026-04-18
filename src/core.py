@@ -139,12 +139,28 @@ def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", sy
         system_prompt = _default_math_system_prompt()
 
     formatted_data = {"instruction": [], "output": [], "final_answer": []}
+    skipped_no_box = 0
+
+    def add_sample(instruction, output_text):
+        nonlocal skipped_no_box
+        final_answer = _extract_final_answer(output_text)
+        if final_answer:
+            formatted_data["instruction"].append(instruction)
+            formatted_data["output"].append(output_text)
+            formatted_data["final_answer"].append(final_answer)
+            return True
+
+        skipped_no_box += 1
+        return False
 
     if os.path.exists(dataset_path):
         with open(dataset_path, "r", encoding="utf-8") as f:
             raw_list = json.load(f)
 
-        for conv in raw_list[:max_samples]:
+        for conv in raw_list:
+            if len(formatted_data["instruction"]) >= max_samples:
+                break
+
             human_text = ""
             assistant_text = ""
             for turn in conv:
@@ -156,25 +172,24 @@ def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", sy
                         assistant_text = str(turn["ground_truth"].get("value", ""))
 
             if human_text and assistant_text:
-                formatted_data["instruction"].append(human_text)
-                formatted_data["output"].append(assistant_text)
-                formatted_data["final_answer"].append(_extract_final_answer(assistant_text))
+                add_sample(human_text, assistant_text)
     else:
         hf_dataset = load_dataset(dataset_path, split=dataset_split)
-        sample_count = min(max_samples, len(hf_dataset))
-        hf_dataset = hf_dataset.select(range(sample_count))
-
         for row in hf_dataset:
+            if len(formatted_data["instruction"]) >= max_samples:
+                break
+
             question, solution = _extract_from_numina_row(row)
             if question and solution:
-                formatted_data["instruction"].append(question)
-                formatted_data["output"].append(solution)
-                formatted_data["final_answer"].append(_extract_final_answer(solution))
+                add_sample(question, solution)
 
     if not formatted_data["instruction"]:
         raise ValueError(
             "No valid samples were loaded. Check dataset path/repo and expected columns."
         )
+
+    if skipped_no_box > 0:
+        print(f"[DATA] Skipped {skipped_no_box} samples without \\boxed{{...}} in target solution.")
 
     raw_dataset = Dataset.from_dict(formatted_data)
     split_ds = raw_dataset.train_test_split(test_size=0.2, seed=42)
@@ -245,10 +260,10 @@ def evaluate_reasoning(
             gen_text = tokenizer.decode(outputs[j][input_len:], skip_special_tokens=True)
             gen_final = _extract_final_answer(gen_text)
 
-            target_raw = batch['final_answer'][j] if 'final_answer' in batch else batch['output'][j]
-            target_final = _extract_final_answer(target_raw)
+            target_final = batch['final_answer'][j] if 'final_answer' in batch else ""
+            is_match = bool(target_final) and (target_final == gen_final)
 
-            if target_final and target_final == gen_final:
+            if is_match:
                 correct += 1
 
             if shown_preview < preview_samples:
@@ -258,7 +273,7 @@ def evaluate_reasoning(
                 print("Pred:", gen_text)
                 print("Pred Final:", gen_final)
                 print("Target Final:", target_final)
-                print("Match:", target_final == gen_final)
+                print("Match:", is_match)
 
     del model
     del tokenizer
