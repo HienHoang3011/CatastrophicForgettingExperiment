@@ -192,7 +192,7 @@ def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", sy
         print(f"[DATA] Skipped {skipped_no_box} samples without \\boxed{{...}} in target solution.")
 
     raw_dataset = Dataset.from_dict(formatted_data)
-    split_ds = raw_dataset.train_test_split(test_size=0.2, seed=42)
+    split_ds = raw_dataset.train_test_split(test_size=0.05, seed=42)
     
     train_dataset = split_ds['train']
     test_dataset = split_ds['test']

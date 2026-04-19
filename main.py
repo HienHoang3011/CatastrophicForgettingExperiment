@@ -23,9 +23,9 @@ def main():
         default="train",
         help="Split khi dùng Hugging Face dataset (vd: train)"
     )
-    parser.add_argument("--samples", type=int, default=10000, help="Số lượng mẫu muốn load (vd: 10000)")
+    parser.add_argument("--samples", type=int, default=30000, help="Số lượng mẫu muốn load (vd: 10000)")
     parser.add_argument("--batch-size", type=int, default=128, help="Batch size khi chạy eval")
-    parser.add_argument("--train-epochs", type=float, default=2.0, help="Số epoch train cho SFT/Steered")
+    parser.add_argument("--train-epochs", type=float, default=4.0, help="Số epoch train cho SFT/Steered")
     parser.add_argument("--learning-rate", type=float, default=5e-5, help="Learning rate cho SFT/Steered")
     parser.add_argument("--eval-max-new-tokens", type=int, default=2048, help="Số token sinh tối đa khi evaluate_reasoning")
     parser.add_argument("--eval-preview-samples", type=int, default=2, help="Số mẫu in preview trong evaluate_reasoning")
