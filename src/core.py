@@ -240,10 +240,9 @@ def evaluate_reasoning(
         batch = test_dataset[i : i + batch_size]
         prompts = []
         for q in batch['instruction']:
-            constrained_q = q + "\n\nReturn final answer as \\boxed{...}."
             messages = [
                 {"role": "system", "content": eval_system_prompt},
-                {"role": "user", "content": constrained_q}
+                {"role": "user", "content": q} 
             ]
             prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
@@ -296,7 +295,7 @@ def evaluate_general(model_path):
     clean_memory()
     return hs_acc * 100, mmlu_acc * 100
 
-def train_model(base_model, train_dataset, output_dir, use_steer=False, learning_rate=5e-5, num_train_epochs=2):
+def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=False, learning_rate=5e-6, num_train_epochs=1):
     print(f"\n[TRAIN] Starting Training (Steered={use_steer}). Output: {output_dir}")
     SFTTrainer, SFTConfig = _import_trl_or_raise()
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
@@ -313,14 +312,24 @@ def train_model(base_model, train_dataset, output_dir, use_steer=False, learning
         dataset_text_field="text",  
         max_length=4096,               
         per_device_train_batch_size=2, 
-        gradient_accumulation_steps=8,
+        gradient_accumulation_steps=16, 
         learning_rate=learning_rate,
         num_train_epochs=num_train_epochs,
         bf16=True,
         gradient_checkpointing=False,  
         logging_steps=10,
-        save_strategy="no",       # CHỐNG TRÀN DISK: Không lưu giữa chừng
-        save_only_model=True,     # CHỐNG TRÀN DISK: Bỏ Optimizer states (Tiết kiệm 13GB)
+        warmup_ratio=0.1,
+        lr_scheduler_type="cosine",
+        eval_strategy="steps",
+        eval_steps=500,
+        per_device_eval_batch_size=2,
+        save_strategy="steps",
+        save_steps=500,
+        load_best_model_at_end=True,
+        metric_for_best_model="eval_loss",
+        greater_is_better=False,
+        save_total_limit=1,
+        save_only_model=True,
         optim="adamw_torch_fused",
         report_to="none"
     )
@@ -332,6 +341,7 @@ def train_model(base_model, train_dataset, output_dir, use_steer=False, learning
         model=model,
         processing_class=tokenizer,
         train_dataset=train_dataset,
+        eval_dataset=eval_dataset,
         args=sft_config,
         **trainer_kwargs
     )
