@@ -209,6 +209,8 @@ def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", sy
         return {"text": texts}
 
     train_dataset = train_dataset.map(format_train, batched=True)
+    test_dataset = test_dataset.map(format_train, batched=True)
+    
     return train_dataset, test_dataset
 
 def evaluate_reasoning(
