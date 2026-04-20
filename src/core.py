@@ -210,7 +210,7 @@ def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", sy
 
     train_dataset = train_dataset.map(format_train, batched=True)
     test_dataset = test_dataset.map(format_train, batched=True)
-    
+
     return train_dataset, test_dataset
 
 def evaluate_reasoning(
@@ -323,10 +323,10 @@ def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=F
         warmup_ratio=0.1,
         lr_scheduler_type="cosine",
         eval_strategy="steps",
-        eval_steps=500,
+        eval_steps=50,
         per_device_eval_batch_size=2,
         save_strategy="steps",
-        save_steps=500,
+        save_steps=50,
         load_best_model_at_end=True,
         metric_for_best_model="eval_loss",
         greater_is_better=False,
