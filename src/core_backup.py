@@ -227,9 +227,9 @@ def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", sy
     train_indices = stratified_order[:split_idx]
     test_indices = stratified_order[split_idx:]
     
-    # Cắt tập test tối đa 500 mẫu nhưng vẫn giữ phân phối (do mảng order đã được stratify dàn trải)
-    if len(test_indices) > 500:
-        test_indices = test_indices[:500]
+    # Cắt tập test tối đa 1500 mẫu nhưng vẫn giữ phân phối (do mảng order đã được stratify dàn trải)
+    if len(test_indices) > 1500:
+        test_indices = test_indices[:1500]
         
     train_dataset = raw_dataset.select(train_indices)
     test_dataset = raw_dataset.select(test_indices)
@@ -240,10 +240,10 @@ def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", sy
 
     def format_train(examples):
         texts = []
-        prompt_suffix = "\n\nPlease put your final answer inside \\boxed{}. For example: \\boxed{your answer}"
         for q, a in zip(examples['instruction'], examples['output']):
             messages = [
-                {"role": "user", "content": q + prompt_suffix},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": q},
                 {"role": "assistant", "content": a}
             ]
             texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False))
@@ -272,11 +272,11 @@ def evaluate_reasoning(
     if is_peft:
         from peft import AutoPeftModelForCausalLM
         model = AutoPeftModelForCausalLM.from_pretrained(
-            model_path, dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
+            model_path, dtype=torch.bfloat16, device_map="cuda", trust_remote_code=True
         ).eval()
     else:
         model = AutoModelForCausalLM.from_pretrained(
-            model_path, dtype=torch.bfloat16, device_map="auto", trust_remote_code=True
+            model_path, dtype=torch.bfloat16, device_map="cuda", trust_remote_code=True
         ).eval()
 
     correct = 0
@@ -289,10 +289,10 @@ def evaluate_reasoning(
     for i in tqdm(range(0, total, batch_size), desc="Inferencing"):
         batch = test_dataset[i : i + batch_size]
         prompts = []
-        prompt_suffix = "\n\nPlease put your final answer inside \\boxed{}. For example: \\boxed{your answer}"
         for q in batch['instruction']:
             messages = [
-                {"role": "user", "content": q + prompt_suffix} 
+                {"role": "system", "content": eval_system_prompt},
+                {"role": "user", "content": q} 
             ]
             prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
@@ -311,36 +311,7 @@ def evaluate_reasoning(
             gen_final = _extract_final_answer(gen_text)
 
             target_final = batch['final_answer'][j] if 'final_answer' in batch else ""
-            
-            def is_math_match(g, t):
-                if not g or not t: return False
-                
-                # 1. Làm sạch cơ bản
-                def clean(s):
-                    return s.lower().replace(" ", "").replace("$", "").replace(",", "").rstrip(".")
-                cg, ct = clean(g), clean(t)
-                if cg == ct: return True
-                
-                # 2. So sánh tương đương toán học bằng sympy
-                try:
-                    import sympy
-                    if sympy.simplify(sympy.sympify(g) - sympy.sympify(t)) == 0:
-                        return True
-                except:
-                    pass
-                
-                # 3. Chấp nhận nếu Target nằm trọn vẹn trong Predicted
-                import re
-                try:
-                    if re.search(r'(?<!\d)' + re.escape(ct) + r'(?!\d)', cg):
-                        return True
-                except:
-                    if ct in cg:
-                        return True
-                        
-                return False
-
-            is_match = is_math_match(gen_final, target_final)
+            is_match = bool(target_final) and (target_final == gen_final)
 
             if is_match:
                 correct += 1
@@ -359,159 +330,33 @@ def evaluate_reasoning(
     clean_memory()
     return (correct / total) * 100
 
-def _evaluate_general_internal(model_path, queue):
-    try:
-        import lm_eval
-        
-        # Monkey patch lm_eval Registry để sửa lỗi đăng ký trùng lặp khi load nhiều task
-        from lm_eval.api.registry import Registry
-        original_register = Registry.register
-        def safe_register(self, *aliases, target=None):
-            def decorator(obj):
-                try:
-                    # Lấy decorator gốc và truyền obj vào
-                    dec = original_register(self, *aliases, target=target)
-                    return dec(obj) if callable(dec) else obj
-                except ValueError as e:
-                    if "already registered" in str(e):
-                        return obj
-                    raise e
-            
-            if target is not None:
-                try:
-                    return original_register(self, *aliases, target=target)
-                except ValueError as e:
-                    if "already registered" in str(e):
-                        return lambda x: x
-                    raise e
-            return decorator
-            
-        Registry.register = safe_register
-
-        print(f"\n[EVAL] Running lm_eval (HellaSwag, MMLU, GSM8K, AIME, ACP Bench) for {model_path}...")
-        import os
-        is_peft = os.path.exists(os.path.join(model_path, "adapter_config.json"))
-        if is_peft:
-            import json
-            with open(os.path.join(model_path, "adapter_config.json")) as f:
-                config = json.load(f)
-            base = config.get("base_model_name_or_path", "")
-            model_args = f"pretrained={base},peft={model_path},dtype=bfloat16,trust_remote_code=True"
-        else:
-            model_args = f"pretrained={model_path},dtype=bfloat16,trust_remote_code=True"
-
-        results = lm_eval.simple_evaluate(
-            model="hf",
-            model_args=model_args,
-            tasks=["hellaswag", "mmlu", "gsm8k", "aime", "acp_bench", "acp_bench_hard"],
-            device="cuda:0",
-            batch_size="auto"
-        )
-        
-        hs_acc = results["results"]["hellaswag"].get("acc_norm,none", results["results"]["hellaswag"].get("acc_norm", 0.0))
-        mmlu_acc = results["results"]["mmlu"].get("acc,none", results["results"]["mmlu"].get("acc", 0.0))
-        gsm8k_acc = results["results"]["gsm8k"].get("exact_match,strict-match", results["results"]["gsm8k"].get("exact_match", results["results"]["gsm8k"].get("acc", 0.0)))
-        
-        aime_res = results["results"].get("aime", {})
-        aime_acc = aime_res.get("exact_match,strict-match", aime_res.get("exact_match", aime_res.get("acc", 0.0)))
-        
-        acp_res = results["results"].get("acp_bench", {})
-        acp_acc = acp_res.get("exact_match,strict-match", acp_res.get("exact_match", acp_res.get("acc", 0.0)))
-        
-        acp_hard_res = results["results"].get("acp_bench_hard", {})
-        acp_hard_acc = acp_hard_res.get("exact_match,strict-match", acp_hard_res.get("exact_match", acp_hard_res.get("acc", 0.0)))
-        
-        clean_memory()
-        res = (hs_acc * 100, mmlu_acc * 100, gsm8k_acc * 100, aime_acc * 100, acp_acc * 100, acp_hard_acc * 100)
-        queue.put(("SUCCESS", res))
-    except Exception as e:
-        queue.put(("ERROR", str(e)))
-
 def evaluate_general(model_path):
-    import multiprocessing
-    ctx = multiprocessing.get_context('spawn')
-    queue = ctx.Queue()
-    p = ctx.Process(target=_evaluate_general_internal, args=(model_path, queue))
-    p.start()
-    p.join()
-    
-    if not queue.empty():
-        status, result = queue.get()
-        if status == "ERROR":
-            raise Exception(result)
-        return result
+    print(f"\n[EVAL] Running lm_eval (HellaSwag, MMLU, GSM8K) for {model_path}...")
+    import os
+    is_peft = os.path.exists(os.path.join(model_path, "adapter_config.json"))
+    if is_peft:
+        import json
+        with open(os.path.join(model_path, "adapter_config.json")) as f:
+            config = json.load(f)
+        base = config.get("base_model_name_or_path", "")
+        model_args = f"pretrained={base},peft={model_path},dtype=bfloat16,trust_remote_code=True"
     else:
-        raise Exception("Tiến trình đánh giá bị gián đoạn đột ngột.")
+        model_args = f"pretrained={model_path},dtype=bfloat16,trust_remote_code=True"
 
-def evaluate_accuracy_in_memory(model, tokenizer, test_dataset, batch_size=4, max_new_tokens=1500):
-    original_padding_side = tokenizer.padding_side
-    tokenizer.padding_side = "left"
-    model.eval()
-    correct = 0
-    total = len(test_dataset)
-    import torch
-    from tqdm import tqdm
+    results = lm_eval.simple_evaluate(
+        model="hf",
+        model_args=model_args,
+        tasks=["hellaswag", "mmlu", "gsm8k"],
+        device="cuda:0",
+        batch_size="auto"
+    )
     
-    prompt_suffix = "\n\nPlease put your final answer inside \\boxed{}. For example: \\boxed{your answer}"
-    for i in tqdm(range(0, total, batch_size), desc="Generative Eval during Train"):
-        batch = test_dataset[i : i + batch_size]
-        prompts = []
-        for q in batch['instruction']:
-            messages = [
-                {"role": "user", "content": q + prompt_suffix}
-            ]
-            prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
-            
-        inputs = tokenizer(prompts, return_tensors="pt", padding=True).to(model.device)
-        
-        with torch.no_grad():
-            outputs = model.generate(
-                **inputs, max_new_tokens=max_new_tokens, do_sample=False,
-                pad_token_id=tokenizer.pad_token_id, eos_token_id=tokenizer.eos_token_id,
-                temperature=None, top_p=None, top_k=None
-            )
-            
-        input_len = inputs.input_ids.shape[-1]
-        for j in range(len(prompts)):
-            gen_text = tokenizer.decode(outputs[j][input_len:], skip_special_tokens=True)
-            gen_final = _extract_final_answer(gen_text)
-            target_final = batch['final_answer'][j] if 'final_answer' in batch else ""
-            
-            def is_math_match(g, t):
-                if not g or not t: return False
-                
-                # 1. Làm sạch cơ bản
-                def clean(s):
-                    return s.lower().replace(" ", "").replace("$", "").replace(",", "").rstrip(".")
-                cg, ct = clean(g), clean(t)
-                if cg == ct: return True
-                
-                # 2. So sánh tương đương toán học bằng sympy (VD: 1/2 == 0.5, x+y == y+x)
-                try:
-                    import sympy
-                    if sympy.simplify(sympy.sympify(g) - sympy.sympify(t)) == 0:
-                        return True
-                except:
-                    pass
-                
-                # 3. Chấp nhận nếu Target nằm trọn vẹn trong Predicted (có chặn viền từ - tránh lỗi 1 in 19)
-                import re
-                try:
-                    # Tránh lỗi escape cho chuỗi toán học
-                    if re.search(r'(?<!\d)' + re.escape(ct) + r'(?!\d)', cg):
-                        return True
-                except:
-                    if ct in cg: # Bất đắc dĩ fallback
-                        return True
-                        
-                return False
-
-            if is_math_match(gen_final, target_final):
-                correct += 1
-                
-    model.train()
-    tokenizer.padding_side = original_padding_side
-    return correct / total if total > 0 else 0.0
+    hs_acc = results["results"]["hellaswag"].get("acc_norm,none", results["results"]["hellaswag"].get("acc_norm", 0.0))
+    mmlu_acc = results["results"]["mmlu"].get("acc,none", results["results"]["mmlu"].get("acc", 0.0))
+    gsm8k_acc = results["results"]["gsm8k"].get("exact_match,strict-match", results["results"]["gsm8k"].get("exact_match", results["results"]["gsm8k"].get("acc", 0.0)))
+    
+    clean_memory()
+    return hs_acc * 100, mmlu_acc * 100, gsm8k_acc * 100
 
 def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=False, learning_rate=5e-6, num_train_epochs=1):
     print(f"\n[TRAIN] Starting Training (Steered={use_steer}). Output: {output_dir}")
@@ -531,10 +376,9 @@ def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=F
 
     from peft import LoraConfig
     peft_config = LoraConfig(
-        r=128,
-        lora_alpha=128,
-        lora_dropout=0.05,
-        bias = "none",
+        r=64,
+        lora_alpha=64,
+        lora_dropout=0,
         target_modules="all-linear",
         task_type="CAUSAL_LM"
     )
@@ -553,37 +397,19 @@ def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=F
         warmup_ratio=0.1,
         lr_scheduler_type="linear",
         eval_strategy="steps",
-        eval_steps=0.25,
+        eval_steps=50,
         per_device_eval_batch_size=2,
-        save_strategy="steps",
-        save_steps=0.25,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_accuracy",
-        greater_is_better=True,
-        save_total_limit=2,
+        save_strategy="no",
+        # load_best_model_at_end=True,
+        # metric_for_best_model="eval_loss",
+        # greater_is_better=False,
+        # save_total_limit=1,
         save_only_model=True,
         optim="adamw_torch_fused",
         report_to="none"
     )
 
-    def _build_custom_trainer_class(base_class):
-        class CustomTrainer(base_class):
-            def evaluate(self, eval_dataset=None, ignore_keys=None, metric_key_prefix="eval"):
-                # 1. Tính toán Loss bình thường
-                metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
-                
-                # 2. Sinh văn bản (Generation) để đo Accuracy
-                ds_to_eval = eval_dataset if eval_dataset is not None else self.eval_dataset
-                if ds_to_eval is not None:
-                    print(f"\n[EVAL] Đo Accuracy sinh text trên {len(ds_to_eval)} mẫu...")
-                    acc = evaluate_accuracy_in_memory(self.model, self.processing_class, ds_to_eval, batch_size=4, max_new_tokens=1500)
-                    metrics[f"{metric_key_prefix}_accuracy"] = acc
-                    print(f"[EVAL] Accuracy: {acc*100:.2f}%")
-                return metrics
-        return CustomTrainer
-
-    base_trainer_cls = _build_steered_trainer_class(SFTTrainer) if use_steer else SFTTrainer
-    trainer_class = _build_custom_trainer_class(base_trainer_cls)
+    trainer_class = _build_steered_trainer_class(SFTTrainer) if use_steer else SFTTrainer
     trainer_kwargs = {"x_factor": 1.0} if use_steer else {}
 
     trainer = trainer_class(

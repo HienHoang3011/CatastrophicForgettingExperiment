@@ -23,12 +23,12 @@ def main():
         default="train",
         help="Split khi dùng Hugging Face dataset (vd: train)"
     )
-    parser.add_argument("--samples", type=int, default=50000, help="Số lượng mẫu muốn load (vd: 10000)")
-    parser.add_argument("--batch-size", type=int, default=32, help="Batch size khi chạy eval")
+    parser.add_argument("--samples", type=int, default=100000, help="Số lượng mẫu muốn load (vd: 10000)")
+    parser.add_argument("--batch-size", type=int, default=64, help="Batch size khi chạy eval")
     parser.add_argument("--train-epochs", type=float, default=1.0, help="Số epoch train cho SFT/Steered")
     parser.add_argument("--learning-rate", type=float, default=5e-6, help="Learning rate cho SFT/Steered")
     parser.add_argument("--eval-max-new-tokens", type=int, default=2048, help="Số token sinh tối đa khi evaluate_reasoning")
-    parser.add_argument("--eval-preview-samples", type=int, default=2, help="Số mẫu in preview trong evaluate_reasoning")
+    parser.add_argument("--eval-preview-samples", type=int, default=10, help="Số mẫu in preview trong evaluate_reasoning")
     parser.add_argument(
         "--system-prompt",
         "--eval-system-prompt",
@@ -91,16 +91,12 @@ def main():
 
     report = {}
 
-    # 3. THỰC THI CÁC THÍ NGHIỆM ĐƯỢC CHỌN
-    if args.run_baseline:
-        print("\n" + "="*50 + "\n[1] EXPERIMENT: BASELINE (ZERO-SHOT)\n" + "="*50)
-        print("[INFO] Bỏ qua đánh giá tập test trên model gốc theo yêu cầu.")
-        base_hs, base_mmlu, base_gsm8k = evaluate_general(args.model)
-        report["Baseline"] = {"Reasoning": "N/A", "HellaSwag": base_hs, "MMLU": base_mmlu, "GSM8K": base_gsm8k}
+    # 3. PHASE 1: TRAINING
+    sft_dir = "./model_sft_ver_4"
+    steer_dir = "./model_steer"
 
     if args.run_sft:
-        print("\n" + "="*50 + "\n[2] EXPERIMENT: STANDARD SFT\n" + "="*50)
-        sft_dir = "./model_sft"
+        print("\n" + "="*50 + "\n[PHASE 1] TRAINING: STANDARD SFT\n" + "="*50)
         train_model(
             args.model,
             train_ds,
@@ -110,21 +106,9 @@ def main():
             learning_rate=args.learning_rate,
             num_train_epochs=args.train_epochs,
         )
-        sft_rsn = evaluate_reasoning(
-            sft_dir,
-            test_ds,
-            args.batch_size,
-            args.system_prompt,
-            args.eval_max_new_tokens,
-            args.eval_preview_samples,
-        )
-        sft_hs, sft_mmlu, sft_gsm8k = evaluate_general(sft_dir)
-        report["Standard SFT"] = {"Reasoning": sft_rsn, "HellaSwag": sft_hs, "MMLU": sft_mmlu, "GSM8K": sft_gsm8k}
-        delete_model(sft_dir)
 
     if args.run_steered:
-        print("\n" + "="*50 + "\n[3] EXPERIMENT: STEERED SFT\n" + "="*50)
-        steer_dir = "./model_steer"
+        print("\n" + "="*50 + "\n[PHASE 1] TRAINING: STEERED SFT\n" + "="*50)
         train_model(
             args.model,
             train_ds,
@@ -134,6 +118,43 @@ def main():
             learning_rate=args.learning_rate,
             num_train_epochs=args.train_epochs,
         )
+
+    # 4. PHASE 2: EVALUATION
+    if args.run_baseline:
+        print("\n" + "="*50 + "\n[PHASE 2] EVALUATION: BASELINE (ZERO-SHOT)\n" + "="*50)
+        print("[INFO] Tiến hành đánh giá tập reasoning trên model gốc.")
+        base_rsn = evaluate_reasoning(
+            args.model,
+            test_ds,
+            args.batch_size,
+            args.system_prompt,
+            args.eval_max_new_tokens,
+            args.eval_preview_samples,
+        )
+        base_hs, base_mmlu, base_gsm8k, base_aime, base_acp, base_acp_hard = evaluate_general(args.model)
+        report["Baseline"] = {
+            "Reasoning": base_rsn, "HellaSwag": base_hs, "MMLU": base_mmlu, "GSM8K": base_gsm8k,
+            "AIME": base_aime, "ACP Bench": base_acp, "ACP Bench Hard": base_acp_hard
+        }
+
+    if args.run_sft:
+        print("\n" + "="*50 + "\n[PHASE 2] EVALUATION: STANDARD SFT\n" + "="*50)
+        sft_rsn = evaluate_reasoning(
+            sft_dir,
+            test_ds,
+            args.batch_size,
+            args.system_prompt,
+            args.eval_max_new_tokens,
+            args.eval_preview_samples,
+        )
+        sft_hs, sft_mmlu, sft_gsm8k, sft_aime, sft_acp, sft_acp_hard = evaluate_general(sft_dir)
+        report["Standard SFT"] = {
+            "Reasoning": sft_rsn, "HellaSwag": sft_hs, "MMLU": sft_mmlu, "GSM8K": sft_gsm8k,
+            "AIME": sft_aime, "ACP Bench": sft_acp, "ACP Bench Hard": sft_acp_hard
+        }
+
+    if args.run_steered:
+        print("\n" + "="*50 + "\n[PHASE 2] EVALUATION: STEERED SFT\n" + "="*50)
         steer_rsn = evaluate_reasoning(
             steer_dir,
             test_ds,
@@ -142,28 +163,49 @@ def main():
             args.eval_max_new_tokens,
             args.eval_preview_samples,
         )
-        steer_hs, steer_mmlu, steer_gsm8k = evaluate_general(steer_dir)
-        report["Steered SFT"] = {"Reasoning": steer_rsn, "HellaSwag": steer_hs, "MMLU": steer_mmlu, "GSM8K": steer_gsm8k}
-        delete_model(steer_dir)
+        steer_hs, steer_mmlu, steer_gsm8k, steer_aime, steer_acp, steer_acp_hard = evaluate_general(steer_dir)
+        report["Steered SFT"] = {
+            "Reasoning": steer_rsn, "HellaSwag": steer_hs, "MMLU": steer_mmlu, "GSM8K": steer_gsm8k,
+            "AIME": steer_aime, "ACP Bench": steer_acp, "ACP Bench Hard": steer_acp_hard
+        }
 
     # 4. IN BÁO CÁO CUỐI CÙNG DỰA TRÊN NHỮNG GÌ ĐÃ CHẠY
     print("\n\n" + "*"*80)
     print(f"FINAL REPORT (Model: {args.model} | Samples: {args.samples})")
     print("*"*80)
     
-    markdown_table = [
-        f"# Báo cáo Kết quả (Model: {args.model} | Samples: {args.samples})\n",
-        f"| {'Experiment':<15} | {'Reasoning Acc (%)':<17} | {'HellaSwag (%)':<15} | {'MMLU (%)':<10} | {'GSM8K (%)':<10} |",
-        f"|{'-'*17}|{'-'*19}|{'-'*17}|{'-'*12}|{'-'*12}|"
+    experiments = list(report.keys())
+    benchmarks = [
+        ("Reasoning", "Reasoning Acc (%)"),
+        ("HellaSwag", "HellaSwag (%)"),
+        ("MMLU", "MMLU (%)"),
+        ("GSM8K", "GSM8K (%)"),
+        ("AIME", "AIME (%)"),
+        ("ACP Bench", "ACP Bench (%)"),
+        ("ACP Bench Hard", "ACP Bench Hard (%)")
     ]
     
-    print(markdown_table[1])
-    print(markdown_table[2])
+    header_cols = [f"{'Benchmark':<20}"] + [f"{exp:<15}" for exp in experiments]
+    header_str = "| " + " | ".join(header_cols) + " |"
+    sep_cols = ["-"*20] + ["-"*15 for _ in experiments]
+    sep_str = "|" + "|".join(sep_cols) + "|"
     
-    for exp, scores in report.items():
-        rsn_val = scores['Reasoning']
-        rsn_str = f"{rsn_val:<17.2f}" if isinstance(rsn_val, (int, float)) else f"{rsn_val:<17}"
-        row_str = f"| {exp:<15} | {rsn_str} | {scores['HellaSwag']:<15.2f} | {scores['MMLU']:<10.2f} | {scores.get('GSM8K', 0.0):<10.2f} |"
+    markdown_table = [
+        f"# Báo cáo Kết quả (Model: {args.model} | Samples: {args.samples})\n",
+        header_str,
+        sep_str
+    ]
+    
+    print(header_str)
+    print(sep_str)
+    
+    for bm_key, bm_name in benchmarks:
+        row_cols = [f"{bm_name:<20}"]
+        for exp in experiments:
+            val = report[exp].get(bm_key, "N/A")
+            val_str = f"{val:<15.2f}" if isinstance(val, (int, float)) else f"{val:<15}"
+            row_cols.append(val_str)
+        row_str = "| " + " | ".join(row_cols) + " |"
         print(row_str)
         markdown_table.append(row_str)
     print("*"*80)

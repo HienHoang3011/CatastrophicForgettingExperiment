@@ -65,6 +65,8 @@ models/
 
 # Data files (keep raw/processed data out of git)
 data/
+model_sft_ver_4/
+model_sft_ver3/
 datasets/
 *.csv
 *.tsv
@@ -77,3 +79,6 @@ datasets/
 
 # Kaggle-specific
 /kaggle/working/**/.ipynb_checkpoints/
+
+*.jsonl
+*.txt
