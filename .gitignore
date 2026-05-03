@@ -82,3 +82,7 @@ datasets/
 
 *.jsonl
 *.txt
+/model_sft
+*.log
+/ver_5
+ver_6

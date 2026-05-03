@@ -11,17 +11,17 @@ def main():
     parser.add_argument("--output", type=str, default="result_compare.md", help="File lưu kết quả")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size khi chạy eval reasoning")
     parser.add_argument("--eval-max-new-tokens", type=int, default=2048, help="Số token sinh tối đa")
-    parser.add_argument("--eval-preview-samples", type=int, default=5, help="Số mẫu preview")
+
     
     args = parser.parse_args()
     
-    print("\n[DATA] Đang load tập test từ 'saved_test_dataset.jsonl'...")
+    print("\n[DATA] Đang load tập test từ 'processed_data/test.jsonl'...")
     try:
-        test_dataset = load_dataset("json", data_files="saved_test_dataset.jsonl", split="train")
+        test_dataset = load_dataset("json", data_files="processed_data/test.jsonl", split="train")
         print(f"[DATA] Load thành công {len(test_dataset)} mẫu.")
     except Exception as e:
         print(f"❌ Lỗi khi load test dataset: {e}")
-        print("💡 Gợi ý: Chắc chắn file saved_test_dataset.jsonl tồn tại trong thư mục hiện tại.")
+        print("💡 Gợi ý: Chắc chắn file processed_data/test.jsonl tồn tại.")
         return
 
     results = {}
@@ -33,18 +33,17 @@ def main():
     print("📊 Đánh giá MODEL GỐC (Baseline)...")
     print("="*60)
     try:
+        hs_base, mmlu_base, gsm8k_base = evaluate_general(args.base_model)
         base_rsn = evaluate_reasoning(
             args.base_model,
             test_dataset,
             args.batch_size,
             None,
-            args.eval_max_new_tokens,
-            args.eval_preview_samples
+            args.eval_max_new_tokens
         )
-        hs_base, mmlu_base, gsm8k_base, aime_base, acp_base, acp_hard_base = evaluate_general(args.base_model)
         results["Baseline"] = {
             "Reasoning": base_rsn, "HellaSwag": hs_base, "MMLU": mmlu_base,
-            "GSM8K": gsm8k_base, "AIME": aime_base, "ACP Bench": acp_base, "ACP Hard": acp_hard_base
+            "GSM8K": gsm8k_base
         }
         print(f"✅ Hoàn thành đánh giá Baseline!")
     except Exception as e:
@@ -62,18 +61,17 @@ def main():
             print(f"❌ Lỗi: Không tìm thấy model tại {args.finetuned_model}")
             return
             
+        hs_fine, mmlu_fine, gsm8k_fine = evaluate_general(args.finetuned_model)
         fine_rsn = evaluate_reasoning(
             args.finetuned_model,
             test_dataset,
             args.batch_size,
             None,
-            args.eval_max_new_tokens,
-            args.eval_preview_samples
+            args.eval_max_new_tokens
         )
-        hs_fine, mmlu_fine, gsm8k_fine, aime_fine, acp_fine, acp_hard_fine = evaluate_general(args.finetuned_model)
         results["Finetuned"] = {
             "Reasoning": fine_rsn, "HellaSwag": hs_fine, "MMLU": mmlu_fine,
-            "GSM8K": gsm8k_fine, "AIME": aime_fine, "ACP Bench": acp_fine, "ACP Hard": acp_hard_fine
+            "GSM8K": gsm8k_fine
         }
         print(f"✅ Hoàn thành đánh giá Finetuned!")
     except Exception as e:
@@ -91,10 +89,7 @@ def main():
         ("Reasoning", "Reasoning Acc (%)"),
         ("HellaSwag", "HellaSwag (%)"),
         ("MMLU", "MMLU (%)"),
-        ("GSM8K", "GSM8K (%)"),
-        ("AIME", "AIME (%)"),
-        ("ACP Bench", "ACP Bench (%)"),
-        ("ACP Hard", "ACP Bench Hard (%)")
+        ("GSM8K", "GSM8K (%)")
     ]
     
     experiments = ["Baseline", "Finetuned"]

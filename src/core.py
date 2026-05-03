@@ -132,135 +132,40 @@ def _default_math_system_prompt():
     )
 
 
-def prepare_data(tokenizer, dataset_path, max_samples, dataset_split="train", system_prompt=None):
-    print(f"\n[DATA] Loading {max_samples} samples from {dataset_path}...")
+def load_saved_datasets(tokenizer, train_path, eval_path, test_path, system_prompt=None):
+    print(f"\n[DATA] Tải dữ liệu đã chuẩn bị từ: {train_path}, {eval_path}, {test_path}...")
 
     if system_prompt is None:
         system_prompt = _default_math_system_prompt()
 
-    formatted_data = {"instruction": [], "output": [], "final_answer": [], "source": []}
-    skipped_no_box = 0
-
-    def add_sample(instruction, output_text, source="unknown"):
-        nonlocal skipped_no_box
-        final_answer = _extract_final_answer(output_text)
-        if final_answer:
-            formatted_data["instruction"].append(instruction)
-            formatted_data["output"].append(output_text)
-            formatted_data["final_answer"].append(final_answer)
-            formatted_data["source"].append(source)
-            return True
-
-        skipped_no_box += 1
-        return False
-
-    from src.data_filter import get_filtered_dataset
-    hf_dataset = get_filtered_dataset(dataset_path, dataset_split, max_samples)
-    for row in hf_dataset:
-        if len(formatted_data["instruction"]) >= max_samples:
-            break
-            
-        # Dùng hàm trích xuất gốc từ core.py để tương thích với cấu trúc của Numina hoặc JSON custom
-        question, solution = _extract_from_numina_row(row)
-        
-        # Thử lấy từ các format khác nếu hàm trên không lấy được
-        if not question or not solution:
-            conv = row.get("conversations", []) if isinstance(row, dict) else []
-            for turn in conv:
-                if isinstance(turn, dict):
-                    if turn.get("from") == "human":
-                        question = turn.get("value", "")
-                    elif turn.get("from") == "assistant":
-                        solution = turn.get("value", "")
-                        if not solution and "ground_truth" in turn:
-                            solution = str(turn["ground_truth"].get("value", ""))
-                            
-        source_val = str(row.get("source", "unknown"))
-        if question and solution:
-            add_sample(question, solution, source_val)
-
-    if not formatted_data["instruction"]:
-        raise ValueError(
-            "No valid samples were loaded. Check dataset path/repo and expected columns."
-        )
-
-    if skipped_no_box > 0:
-        print(f"[DATA] Skipped {skipped_no_box} samples without \\boxed{{...}} in target solution.")
-
-    raw_dataset = Dataset.from_dict(formatted_data)
-    
-    # Chia train/test dựa trên phân phối Stratified theo "source"
-    from collections import defaultdict
-    import random
-    
-    def build_stratified_index_order(labels, batch_size, seed):
-        """Approximate nemotron-master's stratified batching over effective batches."""
-        by_label = defaultdict(list)
-        for idx, label in enumerate(labels):
-            by_label[label].append(idx)
-
-        rng = random.Random(seed)
-        for idx_list in by_label.values():
-            rng.shuffle(idx_list)
-
-        n_batches = max(1, math.ceil(len(labels) / batch_size))
-        batches = [[] for _ in range(n_batches)]
-        batch_order = list(range(n_batches))
-        rng.shuffle(batch_order)
-
-        assigned = 0
-        for label in sorted(by_label.keys()):
-            for idx in by_label[label]:
-                batches[batch_order[assigned % n_batches]].append(idx)
-                assigned += 1
-
-        order = [idx for batch in batches for idx in batch]
-        if len(order) != len(labels):
-            raise ValueError("Stratified order size mismatch")
-        return order
-        
-    labels = formatted_data["source"]
-    # Chia dữ liệu để stratify (giả định dùng batch_size=32 để xáo trộn tốt)
-    stratified_order = build_stratified_index_order(labels, batch_size=32, seed=42)
-    
-    split_idx = int(len(stratified_order) * 0.95)
-    train_indices = stratified_order[:split_idx]
-    test_indices = stratified_order[split_idx:]
-    
-    # Cắt tập test tối đa 500 mẫu nhưng vẫn giữ phân phối (do mảng order đã được stratify dàn trải)
-    if len(test_indices) > 500:
-        test_indices = test_indices[:500]
-        
-    train_dataset = raw_dataset.select(train_indices)
-    test_dataset = raw_dataset.select(test_indices)
-    
-    # Lưu lại tập test để tái sử dụng sau này
-    print("[DATA] Đang lưu tập test (đã stratify) ra file 'saved_test_dataset.jsonl'...")
-    test_dataset.to_json("saved_test_dataset.jsonl", force_ascii=False)
+    train_dataset = load_dataset("json", data_files=train_path, split="train")
+    eval_dataset = load_dataset("json", data_files=eval_path, split="train")
+    test_dataset = load_dataset("json", data_files=test_path, split="train")
 
     def format_train(examples):
         texts = []
-        prompt_suffix = "\n\nPlease put your final answer inside \\boxed{}. For example: \\boxed{your answer}"
         for q, a in zip(examples['instruction'], examples['output']):
             messages = [
-                {"role": "user", "content": q + prompt_suffix},
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": q},
                 {"role": "assistant", "content": a}
             ]
             texts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=False))
         return {"text": texts}
 
+    print("[DATA] Áp dụng chat template...")
     train_dataset = train_dataset.map(format_train, batched=True)
+    eval_dataset = eval_dataset.map(format_train, batched=True)
     test_dataset = test_dataset.map(format_train, batched=True)
 
-    return train_dataset, test_dataset
+    return train_dataset, eval_dataset, test_dataset
 
 def evaluate_reasoning(
     model_path,
     test_dataset,
     batch_size=16,
     eval_system_prompt=None,
-    eval_max_new_tokens=2048,
-    preview_samples=5,
+    eval_max_new_tokens=2048
 ):
     print(f"\n[EVAL] Running Batched Reasoning Inference on {len(test_dataset)} samples...")
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
@@ -289,10 +194,10 @@ def evaluate_reasoning(
     for i in tqdm(range(0, total, batch_size), desc="Inferencing"):
         batch = test_dataset[i : i + batch_size]
         prompts = []
-        prompt_suffix = "\n\nPlease put your final answer inside \\boxed{}. For example: \\boxed{your answer}"
         for q in batch['instruction']:
             messages = [
-                {"role": "user", "content": q + prompt_suffix} 
+                {"role": "system", "content": eval_system_prompt},
+                {"role": "user", "content": q}
             ]
             prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
@@ -345,14 +250,14 @@ def evaluate_reasoning(
             if is_match:
                 correct += 1
 
-            if shown_preview < preview_samples:
-                shown_preview += 1
-                print("\n[PREVIEW SAMPLE]", shown_preview)
-                print("Q:", batch['instruction'][j])
-                print("Pred:", gen_text)
-                print("Pred Final:", gen_final)
-                print("Target Final:", target_final)
-                print("Match:", is_match)
+            # In chi tiết từng mẫu ra terminal (theo yêu cầu debug)
+            print(f"\n[SAMPLE {i + j + 1}/{total} | MODEL: {model_path}]")
+            print("Q:", batch['instruction'][j])
+            print("Pred (Raw):\n", gen_text)
+            print("-" * 20)
+            print("Pred (Filtered):", gen_final)
+            print("Target Final:", target_final)
+            print("Result:", "✅ ĐÚNG" if is_match else "❌ SAI")
 
     del model
     del tokenizer
@@ -388,7 +293,7 @@ def _evaluate_general_internal(model_path, queue):
             
         Registry.register = safe_register
 
-        print(f"\n[EVAL] Running lm_eval (HellaSwag, MMLU, GSM8K, AIME, ACP Bench) for {model_path}...")
+        print(f"\n[EVAL] Running lm_eval (HellaSwag, MMLU, GSM8K) for {model_path}...")
         import os
         is_peft = os.path.exists(os.path.join(model_path, "adapter_config.json"))
         if is_peft:
@@ -403,26 +308,18 @@ def _evaluate_general_internal(model_path, queue):
         results = lm_eval.simple_evaluate(
             model="hf",
             model_args=model_args,
-            tasks=["hellaswag", "mmlu", "gsm8k", "aime", "acp_bench", "acp_bench_hard"],
+            tasks=["hellaswag", "mmlu", "gsm8k"],
             device="cuda:0",
-            batch_size="auto"
+            batch_size=16,
+            gen_kwargs={"max_gen_toks": 2048}
         )
         
         hs_acc = results["results"]["hellaswag"].get("acc_norm,none", results["results"]["hellaswag"].get("acc_norm", 0.0))
         mmlu_acc = results["results"]["mmlu"].get("acc,none", results["results"]["mmlu"].get("acc", 0.0))
         gsm8k_acc = results["results"]["gsm8k"].get("exact_match,strict-match", results["results"]["gsm8k"].get("exact_match", results["results"]["gsm8k"].get("acc", 0.0)))
         
-        aime_res = results["results"].get("aime", {})
-        aime_acc = aime_res.get("exact_match,strict-match", aime_res.get("exact_match", aime_res.get("acc", 0.0)))
-        
-        acp_res = results["results"].get("acp_bench", {})
-        acp_acc = acp_res.get("exact_match,strict-match", acp_res.get("exact_match", acp_res.get("acc", 0.0)))
-        
-        acp_hard_res = results["results"].get("acp_bench_hard", {})
-        acp_hard_acc = acp_hard_res.get("exact_match,strict-match", acp_hard_res.get("exact_match", acp_hard_res.get("acc", 0.0)))
-        
         clean_memory()
-        res = (hs_acc * 100, mmlu_acc * 100, gsm8k_acc * 100, aime_acc * 100, acp_acc * 100, acp_hard_acc * 100)
+        res = (hs_acc * 100, mmlu_acc * 100, gsm8k_acc * 100)
         queue.put(("SUCCESS", res))
     except Exception as e:
         queue.put(("ERROR", str(e)))
@@ -452,13 +349,14 @@ def evaluate_accuracy_in_memory(model, tokenizer, test_dataset, batch_size=4, ma
     import torch
     from tqdm import tqdm
     
-    prompt_suffix = "\n\nPlease put your final answer inside \\boxed{}. For example: \\boxed{your answer}"
+    system_prompt = _default_math_system_prompt()
     for i in tqdm(range(0, total, batch_size), desc="Generative Eval during Train"):
         batch = test_dataset[i : i + batch_size]
         prompts = []
         for q in batch['instruction']:
             messages = [
-                {"role": "user", "content": q + prompt_suffix}
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": q}
             ]
             prompts.append(tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True))
             
@@ -513,6 +411,48 @@ def evaluate_accuracy_in_memory(model, tokenizer, test_dataset, batch_size=4, ma
     tokenizer.padding_side = original_padding_side
     return correct / total if total > 0 else 0.0
 
+def plot_training_history(log_history, output_path, title="Training Curve"):
+    try:
+        import matplotlib.pyplot as plt
+    except ImportError:
+        print("[WARNING] Không tìm thấy thư viện matplotlib. Bỏ qua việc vẽ đồ thị.")
+        return
+
+    steps = []
+    loss = []
+    eval_steps = []
+    eval_acc = []
+
+    for entry in log_history:
+        if "loss" in entry and "step" in entry:
+            steps.append(entry["step"])
+            loss.append(entry["loss"])
+        if "eval_accuracy" in entry and "step" in entry:
+            eval_steps.append(entry["step"])
+            eval_acc.append(entry["eval_accuracy"])
+
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+
+    color = 'tab:red'
+    ax1.set_xlabel('Steps')
+    ax1.set_ylabel('Training Loss', color=color)
+    if steps and loss:
+        ax1.plot(steps, loss, color=color, label='Train Loss')
+    ax1.tick_params(axis='y', labelcolor=color)
+
+    if eval_steps and eval_acc:
+        ax2 = ax1.twinx()
+        color = 'tab:blue'
+        ax2.set_ylabel('Eval Accuracy (%)', color=color)
+        ax2.plot(eval_steps, [acc * 100 for acc in eval_acc], color=color, marker='o', label='Eval Acc')
+        ax2.tick_params(axis='y', labelcolor=color)
+
+    plt.title(title)
+    fig.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+    print(f"\n[INFO] Đã lưu đồ thị huấn luyện tại: {output_path}")
+
 def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=False, learning_rate=5e-6, num_train_epochs=1):
     print(f"\n[TRAIN] Starting Training (Steered={use_steer}). Output: {output_dir}")
     SFTTrainer, SFTConfig = _import_trl_or_raise()
@@ -531,20 +471,19 @@ def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=F
 
     from peft import LoraConfig
     peft_config = LoraConfig(
-        r=128,
-        lora_alpha=128,
-        lora_dropout=0.05,
-        bias = "none",
+        r=64,
+        lora_alpha=64,
+        lora_dropout=0,
         target_modules="all-linear",
-        task_type="CAUSAL_LM"
+        task_type="CAUSAL_LM",
     )
 
     sft_config = SFTConfig(
         output_dir=output_dir,
-        dataset_text_field="text",  
-        max_length=8192,               
-        per_device_train_batch_size=4, 
-        gradient_accumulation_steps=16, 
+        dataset_text_field="text",
+        max_length=8192,
+        per_device_train_batch_size=4,
+        gradient_accumulation_steps=16,
         learning_rate=learning_rate,
         num_train_epochs=num_train_epochs,
         bf16=True,
@@ -555,16 +494,44 @@ def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=F
         eval_strategy="steps",
         eval_steps=0.25,
         per_device_eval_batch_size=2,
-        save_strategy="steps",
-        save_steps=0.25,
-        load_best_model_at_end=True,
-        metric_for_best_model="eval_accuracy",
-        greater_is_better=True,
-        save_total_limit=2,
+        save_strategy="no",
+        # load_best_model_at_end=True,
+        # metric_for_best_model="eval_loss",
+        # greater_is_better=False,
+        # save_total_limit=1,
         save_only_model=True,
         optim="adamw_torch_fused",
-        report_to="none"
+        report_to="none",
     )
+
+
+    from transformers import DataCollatorForLanguageModeling
+    
+    class CustomDataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
+        def __init__(self, response_template, tokenizer, *args, **kwargs):
+            super().__init__(tokenizer=tokenizer, mlm=False, *args, **kwargs)
+            self.response_template = response_template
+
+        def torch_call(self, examples):
+            batch = super().torch_call(examples)
+            for i in range(len(batch["labels"])):
+                label = batch["labels"][i]
+                response_len = len(self.response_template)
+                for j in range(len(label) - response_len + 1):
+                    if label[j : j + response_len].tolist() == self.response_template:
+                        batch["labels"][i, : j + response_len] = -100
+                        break
+            return batch
+
+    try:
+        # Tối ưu hóa đặc biệt cho Qwen để tránh lỗi mã hóa chuỗi
+        response_template_str = "<|im_start|>assistant\n"
+        response_template_ids = tokenizer.encode(response_template_str, add_special_tokens=False)
+        print(f"[TRAIN] Sử dụng Custom DataCollatorForCompletionOnlyLM với template IDs: {response_template_ids} (Qwen format)")
+        data_collator = CustomDataCollatorForCompletionOnlyLM(response_template=response_template_ids, tokenizer=tokenizer)
+    except Exception as e:
+        print(f"[WARNING] Lỗi thiết lập DataCollator: {e}. Sẽ chạy mặc định.")
+        data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
     def _build_custom_trainer_class(base_class):
         class CustomTrainer(base_class):
@@ -572,13 +539,18 @@ def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=F
                 # 1. Tính toán Loss bình thường
                 metrics = super().evaluate(eval_dataset, ignore_keys, metric_key_prefix)
                 
-                # 2. Sinh văn bản (Generation) để đo Accuracy
-                ds_to_eval = eval_dataset if eval_dataset is not None else self.eval_dataset
-                if ds_to_eval is not None:
-                    print(f"\n[EVAL] Đo Accuracy sinh text trên {len(ds_to_eval)} mẫu...")
-                    acc = evaluate_accuracy_in_memory(self.model, self.processing_class, ds_to_eval, batch_size=4, max_new_tokens=1500)
-                    metrics[f"{metric_key_prefix}_accuracy"] = acc
-                    print(f"[EVAL] Accuracy: {acc*100:.2f}%")
+                # 2. Sinh văn bản (Generation) để đo Accuracy (TẠM TẮT ĐỂ THỬ NGHIỆM NHANH)
+                # ds_to_eval = eval_dataset if eval_dataset is not None else self.eval_dataset
+                # if ds_to_eval is not None:
+                #     print(f"\n[EVAL] Đo Accuracy sinh text trên {len(ds_to_eval)} mẫu...")
+                #     acc = evaluate_accuracy_in_memory(self.model, self.processing_class, ds_to_eval, batch_size=4, max_new_tokens=1500)
+                #     metrics[f"{metric_key_prefix}_accuracy"] = acc
+                #     print(f"[EVAL] Accuracy: {acc*100:.2f}%")
+                #     
+                #     # Inject vào log_history để hàm plot_training_history có dữ liệu vẽ
+                #     if len(self.state.log_history) > 0:
+                #         self.state.log_history[-1][f"{metric_key_prefix}_accuracy"] = acc
+                        
                 return metrics
         return CustomTrainer
 
@@ -593,11 +565,17 @@ def train_model(base_model, train_dataset, eval_dataset, output_dir, use_steer=F
         eval_dataset=eval_dataset,
         args=sft_config,
         peft_config=peft_config,
+        data_collator=data_collator,
         **trainer_kwargs
     )
 
     trainer.train()
     trainer.save_model(output_dir)
+    
+    # Vẽ đồ thị training
+    plot_name = "steered" if use_steer else "sft"
+    plot_path = f"{plot_name}_training_curve.png"
+    plot_training_history(trainer.state.log_history, plot_path, title=f"Training Curve ({plot_name.upper()})")
     
     del trainer
     del model

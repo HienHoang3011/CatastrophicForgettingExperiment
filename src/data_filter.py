@@ -22,12 +22,12 @@ def get_filtered_dataset(dataset_path: str, split: str, max_samples: int):
     # 1. Lọc bỏ các mẫu có source gsm8k trực tiếp từ dataset
     def filter_source(example):
         source = str(example.get('source', '')).lower()
-        if 'gsm8k' in source or 'amc_aime' in source:
+        if 'gsm8k' in source:
             return False
         return True
     
-    ds_no_gsm8k = ds_main.filter(filter_source, num_proc=8, desc="Lọc bỏ source gsm8k & amc_aime")
-    print(f"[DATA FILTER] Lọc bỏ gsm8k & amc_aime: Còn lại {len(ds_no_gsm8k)}/{len(ds_main)} mẫu.")
+    ds_no_gsm8k = ds_main.filter(filter_source, num_proc=8, desc="Lọc bỏ source gsm8k")
+    print(f"[DATA FILTER] Lọc bỏ gsm8k: Còn lại {len(ds_no_gsm8k)}/{len(ds_main)} mẫu.")
     
     # 2. Xử lý trùng lặp (Dùng Pandas để nhanh gọn và tiện lợi)
     print(f"[DATA FILTER] Chuyển đổi sang Pandas để kiểm tra trùng lặp...")

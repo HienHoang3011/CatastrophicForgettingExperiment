@@ -1,6 +1,6 @@
 import argparse
 from src.core import (
-    prepare_data, train_model, 
+    load_saved_datasets, train_model, 
     evaluate_reasoning, evaluate_general, delete_model, clean_memory
 )
 from transformers import AutoTokenizer
@@ -23,7 +23,7 @@ def main():
         default="train",
         help="Split khi dùng Hugging Face dataset (vd: train)"
     )
-    parser.add_argument("--samples", type=int, default=100000, help="Số lượng mẫu muốn load (vd: 10000)")
+    parser.add_argument("--samples", type=int, default=50000, help="Số lượng mẫu muốn load (vd: 10000)")
     parser.add_argument("--batch-size", type=int, default=64, help="Batch size khi chạy eval")
     parser.add_argument("--train-epochs", type=float, default=1.0, help="Số epoch train cho SFT/Steered")
     parser.add_argument("--learning-rate", type=float, default=5e-6, help="Learning rate cho SFT/Steered")
@@ -79,11 +79,11 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     
-    train_ds, test_ds = prepare_data(
+    train_ds, eval_ds, test_ds = load_saved_datasets(
         tokenizer,
-        args.dataset,
-        args.samples,
-        args.dataset_split,
+        "processed_data/train.jsonl",
+        "processed_data/eval.jsonl",
+        "processed_data/test.jsonl",
         args.system_prompt
     )
     del tokenizer
@@ -92,7 +92,7 @@ def main():
     report = {}
 
     # 3. PHASE 1: TRAINING
-    sft_dir = "./model_sft_ver_4"
+    sft_dir = "./model_sft"
     steer_dir = "./model_steer"
 
     if args.run_sft:
@@ -100,7 +100,7 @@ def main():
         train_model(
             args.model,
             train_ds,
-            test_ds,
+            eval_ds,
             sft_dir,
             use_steer=False,
             learning_rate=args.learning_rate,
@@ -112,7 +112,7 @@ def main():
         train_model(
             args.model,
             train_ds,
-            test_ds,
+            eval_ds,
             steer_dir,
             use_steer=True,
             learning_rate=args.learning_rate,
@@ -131,11 +131,12 @@ def main():
             args.eval_max_new_tokens,
             args.eval_preview_samples,
         )
-        base_hs, base_mmlu, base_gsm8k, base_aime, base_acp, base_acp_hard = evaluate_general(args.model)
+        base_hs, base_mmlu, base_gsm8k = evaluate_general(args.model)
         report["Baseline"] = {
-            "Reasoning": base_rsn, "HellaSwag": base_hs, "MMLU": base_mmlu, "GSM8K": base_gsm8k,
-            "AIME": base_aime, "ACP Bench": base_acp, "ACP Bench Hard": base_acp_hard
+            "Reasoning": base_rsn, "HellaSwag": base_hs, "MMLU": base_mmlu, "GSM8K": base_gsm8k
         }
+        print(f"\n[KẾT QUẢ TRUNG GIAN - BASELINE]")
+        print(f"Reasoning: {base_rsn:.2f}% | HellaSwag: {base_hs:.2f}% | MMLU: {base_mmlu:.2f}% | GSM8K: {base_gsm8k:.2f}%")
 
     if args.run_sft:
         print("\n" + "="*50 + "\n[PHASE 2] EVALUATION: STANDARD SFT\n" + "="*50)
@@ -147,11 +148,12 @@ def main():
             args.eval_max_new_tokens,
             args.eval_preview_samples,
         )
-        sft_hs, sft_mmlu, sft_gsm8k, sft_aime, sft_acp, sft_acp_hard = evaluate_general(sft_dir)
+        sft_hs, sft_mmlu, sft_gsm8k = evaluate_general(sft_dir)
         report["Standard SFT"] = {
-            "Reasoning": sft_rsn, "HellaSwag": sft_hs, "MMLU": sft_mmlu, "GSM8K": sft_gsm8k,
-            "AIME": sft_aime, "ACP Bench": sft_acp, "ACP Bench Hard": sft_acp_hard
+            "Reasoning": sft_rsn, "HellaSwag": sft_hs, "MMLU": sft_mmlu, "GSM8K": sft_gsm8k
         }
+        print(f"\n[KẾT QUẢ TRUNG GIAN - STANDARD SFT]")
+        print(f"Reasoning: {sft_rsn:.2f}% | HellaSwag: {sft_hs:.2f}% | MMLU: {sft_mmlu:.2f}% | GSM8K: {sft_gsm8k:.2f}%")
 
     if args.run_steered:
         print("\n" + "="*50 + "\n[PHASE 2] EVALUATION: STEERED SFT\n" + "="*50)
@@ -163,11 +165,12 @@ def main():
             args.eval_max_new_tokens,
             args.eval_preview_samples,
         )
-        steer_hs, steer_mmlu, steer_gsm8k, steer_aime, steer_acp, steer_acp_hard = evaluate_general(steer_dir)
+        steer_hs, steer_mmlu, steer_gsm8k = evaluate_general(steer_dir)
         report["Steered SFT"] = {
-            "Reasoning": steer_rsn, "HellaSwag": steer_hs, "MMLU": steer_mmlu, "GSM8K": steer_gsm8k,
-            "AIME": steer_aime, "ACP Bench": steer_acp, "ACP Bench Hard": steer_acp_hard
+            "Reasoning": steer_rsn, "HellaSwag": steer_hs, "MMLU": steer_mmlu, "GSM8K": steer_gsm8k
         }
+        print(f"\n[KẾT QUẢ TRUNG GIAN - STEERED SFT]")
+        print(f"Reasoning: {steer_rsn:.2f}% | HellaSwag: {steer_hs:.2f}% | MMLU: {steer_mmlu:.2f}% | GSM8K: {steer_gsm8k:.2f}%")
 
     # 4. IN BÁO CÁO CUỐI CÙNG DỰA TRÊN NHỮNG GÌ ĐÃ CHẠY
     print("\n\n" + "*"*80)
@@ -179,10 +182,7 @@ def main():
         ("Reasoning", "Reasoning Acc (%)"),
         ("HellaSwag", "HellaSwag (%)"),
         ("MMLU", "MMLU (%)"),
-        ("GSM8K", "GSM8K (%)"),
-        ("AIME", "AIME (%)"),
-        ("ACP Bench", "ACP Bench (%)"),
-        ("ACP Bench Hard", "ACP Bench Hard (%)")
+        ("GSM8K", "GSM8K (%)")
     ]
     
     header_cols = [f"{'Benchmark':<20}"] + [f"{exp:<15}" for exp in experiments]

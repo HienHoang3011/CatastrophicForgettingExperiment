@@ -1,6 +1,6 @@
 import argparse
 from src.core import (
-    prepare_data, train_model, 
+    load_saved_datasets, train_model, 
     evaluate_reasoning, evaluate_general, delete_model, clean_memory
 )
 from transformers import AutoTokenizer
@@ -11,19 +11,9 @@ def main():
     
     # Cấu hình Model & Data
     parser.add_argument("--model", type=str, default="Qwen/Qwen2.5-3B-Instruct", help="HuggingFace Model ID")
-    parser.add_argument(
-        "--dataset",
-        type=str,
-        default="AI-MO/NuminaMath-CoT",
-        help="Đường dẫn file JSON local hoặc Hugging Face dataset ID"
-    )
-    parser.add_argument(
-        "--dataset-split",
-        type=str,
-        default="train",
-        help="Split khi dùng Hugging Face dataset (vd: train)"
-    )
-    parser.add_argument("--samples", type=int, default=50000, help="Số lượng mẫu muốn load (vd: 10000)")
+    parser.add_argument("--train-data", type=str, default="processed_data/train.jsonl", help="Đường dẫn tập train đã chuẩn bị")
+    parser.add_argument("--eval-data", type=str, default="processed_data/eval.jsonl", help="Đường dẫn tập eval đã chuẩn bị")
+    parser.add_argument("--test-data", type=str, default="processed_data/test.jsonl", help="Đường dẫn tập test đã chuẩn bị")
     parser.add_argument("--batch-size", type=int, default=32, help="Batch size khi chạy eval")
     parser.add_argument("--train-epochs", type=float, default=1.0, help="Số epoch train cho SFT/Steered")
     parser.add_argument("--learning-rate", type=float, default=5e-6, help="Learning rate cho SFT/Steered")
@@ -79,11 +69,11 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
     
-    train_ds, test_ds = prepare_data(
+    train_ds, eval_ds, test_ds = load_saved_datasets(
         tokenizer,
-        args.dataset,
-        args.samples,
-        args.dataset_split,
+        args.train_data,
+        args.eval_data,
+        args.test_data,
         args.system_prompt
     )
     del tokenizer
@@ -104,7 +94,7 @@ def main():
         train_model(
             args.model,
             train_ds,
-            test_ds,
+            eval_ds,
             sft_dir,
             use_steer=False,
             learning_rate=args.learning_rate,
@@ -128,7 +118,7 @@ def main():
         train_model(
             args.model,
             train_ds,
-            test_ds,
+            eval_ds,
             steer_dir,
             use_steer=True,
             learning_rate=args.learning_rate,
@@ -148,11 +138,11 @@ def main():
 
     # 4. IN BÁO CÁO CUỐI CÙNG DỰA TRÊN NHỮNG GÌ ĐÃ CHẠY
     print("\n\n" + "*"*80)
-    print(f"FINAL REPORT (Model: {args.model} | Samples: {args.samples})")
+    print(f"FINAL REPORT (Model: {args.model})")
     print("*"*80)
     
     markdown_table = [
-        f"# Báo cáo Kết quả (Model: {args.model} | Samples: {args.samples})\n",
+        f"# Báo cáo Kết quả (Model: {args.model})\n",
         f"| {'Experiment':<15} | {'Reasoning Acc (%)':<17} | {'HellaSwag (%)':<15} | {'MMLU (%)':<10} | {'GSM8K (%)':<10} |",
         f"|{'-'*17}|{'-'*19}|{'-'*17}|{'-'*12}|{'-'*12}|"
     ]
