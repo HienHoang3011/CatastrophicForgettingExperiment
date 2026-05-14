@@ -19,47 +19,6 @@ def _import_trl_or_raise():
         raise RuntimeError("Failed to import TRL training components.") from e
     return SFTTrainer, SFTConfig
 
-def _build_steered_trainer_class(sft_trainer_cls):
-    class SteeredTrainer(sft_trainer_cls):
-        def __init__(self, *args, x_factor=0.2, **kwargs):
-            super().__init__(*args, **kwargs)
-            self.margin = math.log(1 + x_factor)
-
-        def compute_loss(self, model, inputs, return_outputs=False, num_items_in_batch=None):
-            outputs = model(**inputs)
-            logits = outputs.get("logits")
-            labels = inputs.get("labels")
-
-            shift_logits = logits[..., :-1, :].contiguous()
-            shift_labels = labels[..., 1:].contiguous()
-
-            shift_logits = shift_logits.view(-1, shift_logits.size(-1))
-            shift_labels = shift_labels.view(-1)
-
-            mask = shift_labels != -100
-            active_logits = shift_logits[mask]
-            active_labels = shift_labels[mask]
-
-            with torch.no_grad():
-                target_logits = active_logits.clone()
-                temp_logits = target_logits.clone()
-                batch_idx = torch.arange(target_logits.size(0), device=target_logits.device)
-                temp_logits[batch_idx, active_labels] = float('-inf')
-
-                max_other_logits, _ = torch.max(temp_logits, dim=-1)
-                current_gt_logits = target_logits[batch_idx, active_labels]
-
-                target_gt_logits = torch.max(current_gt_logits, max_other_logits + self.margin)
-                target_logits[batch_idx, active_labels] = target_gt_logits
-
-                target_probs = F.softmax(target_logits, dim=-1)
-
-            log_probs = F.log_softmax(active_logits, dim=-1)
-            loss = F.kl_div(log_probs, target_probs, reduction='batchmean')
-
-            return (loss, outputs) if return_outputs else loss
-
-    return SteeredTrainer
 
 class CustomDataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
     def __init__(self, response_template, tokenizer, *args, **kwargs):
@@ -77,8 +36,8 @@ class CustomDataCollatorForCompletionOnlyLM(DataCollatorForLanguageModeling):
                     break
         return batch
 
-def train_model(base_model, train_dataset, output_dir, use_steer=False, learning_rate=5e-6, num_train_epochs=1):
-    print(f"\n[TRAIN] Starting Training (Steered={use_steer}). Output: {output_dir}")
+def train_model(base_model, train_dataset, output_dir, learning_rate=5e-6, num_train_epochs=1):
+    print(f"\n[TRAIN] Starting Training. Output: {output_dir}")
     SFTTrainer, SFTConfig = _import_trl_or_raise()
     tokenizer = AutoTokenizer.from_pretrained(base_model, trust_remote_code=True)
     tokenizer.pad_token = tokenizer.eos_token
@@ -130,17 +89,13 @@ def train_model(base_model, train_dataset, output_dir, use_steer=False, learning
         print(f"[WARNING] Lỗi thiết lập DataCollator: {e}. Sẽ chạy mặc định.")
         data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, mlm=False)
 
-    trainer_class = _build_steered_trainer_class(SFTTrainer) if use_steer else SFTTrainer
-    trainer_kwargs = {"x_factor": 1.0} if use_steer else {}
-
-    trainer = trainer_class(
+    trainer = SFTTrainer(
         model=model,
         processing_class=tokenizer,
         train_dataset=train_dataset,
         args=sft_config,
         peft_config=peft_config,
         data_collator=data_collator,
-        **trainer_kwargs
     )
 
     trainer.train()
@@ -169,15 +124,11 @@ def main():
         ),
         help="System prompt dùng chung cho train formatting"
     )
-    parser.add_argument("--mode", type=str, choices=["sft", "steered", "sft-steered"], default="sft", help="Chọn chế độ chạy")
     parser.add_argument("--push-to-hub", action="store_true", help="Đẩy model lên HuggingFace Hub sau khi train")
     parser.add_argument("--hf-token", type=str, help="HuggingFace token")
     parser.add_argument("--hub-model-id", type=str, help="Tên repo trên HuggingFace Hub")
 
     args = parser.parse_args()
-
-    args.run_sft = args.mode in ["sft", "sft-steered"]
-    args.run_steered = args.mode in ["steered", "sft-steered"]
 
     if args.push_to_hub and (not args.hf_token or not args.hub_model_id):
         print("❌ LỖI: Bạn đã chọn --push-to-hub nhưng chưa cung cấp --hf-token hoặc --hub-model-id!")
@@ -215,69 +166,35 @@ def main():
     clean_memory()
 
     sft_dir = "./model_sft"
-    steer_dir = "./model_steer"
 
-    if args.run_sft:
-        print("\n" + "="*50 + "\n[TRAINING] STANDARD SFT\n" + "="*50)
-        train_model(
-            args.model,
-            train_ds,
-            sft_dir,
-            use_steer=False,
-            learning_rate=args.learning_rate,
-            num_train_epochs=args.train_epochs,
-        )
-        
-        if args.push_to_hub:
-            print(f"\n[PUSH TO HUB] Pushing SFT model to {args.hub_model_id}-sft...")
-            try:
-                api = HfApi(token=args.hf_token)
-                repo_id = f"{args.hub_model_id}-sft"
-                create_repo(repo_id=repo_id, token=args.hf_token, exist_ok=True)
+    print("\n" + "="*50 + "\n[TRAINING] SFT\n" + "="*50)
+    train_model(
+        args.model,
+        train_ds,
+        sft_dir,
+        learning_rate=args.learning_rate,
+        num_train_epochs=args.train_epochs,
+    )
+    
+    if args.push_to_hub:
+        print(f"\n[PUSH TO HUB] Pushing model to {args.hub_model_id}...")
+        try:
+            api = HfApi(token=args.hf_token)
+            repo_id = args.hub_model_id
+            create_repo(repo_id=repo_id, token=args.hf_token, exist_ok=True)
+            
+            import shutil
+            for filename in os.listdir(temp_tokenizer_dir):
+                shutil.copy2(os.path.join(temp_tokenizer_dir, filename), sft_dir)
                 
-                import shutil
-                for filename in os.listdir(temp_tokenizer_dir):
-                    shutil.copy2(os.path.join(temp_tokenizer_dir, filename), sft_dir)
-                    
-                api.upload_folder(
-                    folder_path=sft_dir,
-                    repo_id=repo_id,
-                    repo_type="model",
-                )
-                print("✅ Đã push SFT model thành công!")
-            except Exception as e:
-                print(f"❌ Lỗi khi push SFT model: {e}")
-
-    if args.run_steered:
-        print("\n" + "="*50 + "\n[TRAINING] STEERED SFT\n" + "="*50)
-        train_model(
-            args.model,
-            train_ds,
-            steer_dir,
-            use_steer=True,
-            learning_rate=args.learning_rate,
-            num_train_epochs=args.train_epochs,
-        )
-        
-        if args.push_to_hub:
-            print(f"\n[PUSH TO HUB] Pushing Steered model to {args.hub_model_id}-steered...")
-            try:
-                api = HfApi(token=args.hf_token)
-                repo_id = f"{args.hub_model_id}-steered"
-                create_repo(repo_id=repo_id, token=args.hf_token, exist_ok=True)
-                
-                import shutil
-                for filename in os.listdir(temp_tokenizer_dir):
-                    shutil.copy2(os.path.join(temp_tokenizer_dir, filename), steer_dir)
-                    
-                api.upload_folder(
-                    folder_path=steer_dir,
-                    repo_id=repo_id,
-                    repo_type="model",
-                )
-                print("✅ Đã push Steered model thành công!")
-            except Exception as e:
-                print(f"❌ Lỗi khi push Steered model: {e}")
+            api.upload_folder(
+                folder_path=sft_dir,
+                repo_id=repo_id,
+                repo_type="model",
+            )
+            print("✅ Đã push model thành công!")
+        except Exception as e:
+            print(f"❌ Lỗi khi push model: {e}")
 
     if os.path.exists(temp_tokenizer_dir):
         import shutil
